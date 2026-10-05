@@ -283,7 +283,7 @@ it('expands history and reopens a review and its saved PDF without regenerating'
   await wrapper.get('[data-testid="history-toggle"]').trigger('click')
   await flushPromises()
   expect(wrapper.get('[data-testid="history-toggle"]').attributes('aria-expanded')).toBe('true')
-  await wrapper.findAll('button').find(b => b.text() === 'Open result').trigger('click')
+  await wrapper.get('.history-item').trigger('click')
   await flushPromises()
   expect(wrapper.get('.markdown h1').text()).toBe('Historical review')
   expect(wrapper.get('.saved-pdfs a').attributes('href')).toBe('/api/pdfs/pdf1')
@@ -307,9 +307,69 @@ it('restores saved search filters and papers from history', async () => {
   await flushPromises()
   await wrapper.get('[data-testid="history-toggle"]').trigger('click')
   await flushPromises()
-  await wrapper.findAll('button').find(b => b.text() === 'Open result').trigger('click')
+  await wrapper.get('.history-item').trigger('click')
   await flushPromises()
   expect(wrapper.get('[data-testid="area-filter"]').element.value).toBe('computer_science')
   expect(wrapper.get('[data-testid="applied-filters"]').text()).toBe('Computer science · 2020–2025')
   expect(wrapper.findAll('.paper')).toHaveLength(1)
+})
+
+it('links citations to the coverage table and lists report sections', async () => {
+  window.localStorage.setItem('literature-active-review', 'job')
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => respond(config))
+    .mockImplementationOnce(() => respond({
+      id: 'job', topic: 'graphs', status: 'completed',
+      review: '# Overview\nA finding [P1, P2] and [P9].\n## Research gaps\nMore.',
+      evidence: [{ id: 'P1', title: 'One', coverage: 'full PDF' }, { id: 'P2', title: 'Two', coverage: 'truncated PDF' }],
+    })))
+  wrapper = mount(App)
+  await flushPromises()
+  expect(wrapper.findAll('.markdown a.cite').map(a => a.attributes('href'))).toEqual(['#source-P1', '#source-P2'])
+  expect(wrapper.get('.markdown').text()).toContain('[P9]')
+  expect(wrapper.find('.toc').exists()).toBe(false)
+  await wrapper.get('.toc-toggle').trigger('click')
+  expect(wrapper.findAll('.toc a').map(a => a.text())).toEqual(['Overview', 'Research gaps', 'Sources & coverage'])
+  expect(wrapper.get('.markdown h2').attributes('id')).toBe(wrapper.findAll('.toc a')[1].attributes('href').slice(1))
+  expect(wrapper.get('#source-P2 .cov').classes()).toContain('warning')
+  await wrapper.findAll('.toc a')[1].trigger('click')
+  expect(wrapper.find('.toc').exists()).toBe(false)
+})
+
+it('shows review steps from backend progress messages', async () => {
+  window.localStorage.setItem('literature-active-review', 'job')
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => respond(config))
+    .mockImplementationOnce(() => respond({
+      id: 'job', topic: 'graphs', status: 'running', progress: 'Reading paper 2/2: Second',
+      papers: [paper, { ...paper, url: `${paper.url}b`, title: 'Second' }],
+    })))
+  wrapper = mount(App)
+  await flushPromises()
+  expect(wrapper.get('.steps li.now').text()).toContain('2 / 2')
+  expect(wrapper.findAll('.reading-list li').map(li => li.classes()[0])).toEqual(['done', 'reading'])
+})
+
+it('offers regeneration only for the selection that produced the shown review', async () => {
+  const second = { ...paper, url: `${paper.url}b`, title: 'Second' }
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => respond(config))
+    .mockImplementationOnce(() => respond({ items: [{
+      id: 'old-review', kind: 'review', topic: 'graphs', status: 'completed', paper_count: 1,
+      created_at: '2026-01-01T00:00:00Z',
+    }], has_more: false }))
+    .mockImplementationOnce(() => respond({
+      id: 'old-review', kind: 'review', topic: 'graphs', status: 'completed', papers: [paper, second],
+      review: '# Old', evidence: [],
+    })))
+  wrapper = mount(App)
+  await flushPromises()
+  await wrapper.get('[data-testid="history-toggle"]').trigger('click')
+  await flushPromises()
+  await wrapper.get('.history-item').trigger('click')
+  await flushPromises()
+  const action = () => wrapper.get('.selection-bar button:last-child')
+  expect(action().text()).toBe('Regenerate review')
+  await wrapper.findAll('input[type="checkbox"]')[1].setValue(false)
+  expect(action().text()).toBe('Generate review')
 })
