@@ -8,6 +8,23 @@ Minimal implementation of `CrewAI_文獻搜尋.pdf`: **Vue 3 + Vite** frontend,
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Node.js
 22.12+ (or a newer supported version), and [pnpm](https://pnpm.io/installation).
 
+With Make and Bash 4.3+ installed, run from the project root:
+
+```sh
+make install
+# Edit backend/.env to set your API key and model.
+make start
+```
+
+`make start` runs the backend on **http://localhost:8000** and Vue on
+**http://localhost:5173**. Press **Ctrl+C** to stop both services, including their
+child processes. If either service exits, the other is stopped as well. Existing
+`backend/.env` settings are preserved. Run `make help` to list commands.
+
+Use `make backend` and `make frontend` to run services in separate terminals.
+`make serve` builds Vue and runs the app on port 8000; `make test` runs both test
+suites. The equivalent commands without Make are below.
+
 From the project root, start the Python API:
 
 ```sh
@@ -87,6 +104,19 @@ authentication and is intended for local use.
 
 Python dependencies, the uv lockfile, environment template, and tests also live
 in `backend/`. The Vue project and its dependencies live in `frontend/`.
+
+`backend/requirement.txt` provides pinned runtime dependencies exported from
+`uv.lock` for pip installation (Python 3.12 or 3.13):
+
+```sh
+python -m pip install -r backend/requirement.txt
+```
+
+Regenerate it after changing Python dependencies:
+
+```sh
+uv export --directory backend --frozen --offline --no-cache --no-dev --no-emit-project --no-hashes --no-annotate --output-file requirement.txt --quiet
+```
 
 `POST /api/review` returns **202 Accepted** and a job ID immediately. The frontend
 polls `/api/reviews/{id}` every two seconds, with a finite timeout on each request.
