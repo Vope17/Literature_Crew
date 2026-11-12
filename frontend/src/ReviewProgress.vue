@@ -11,6 +11,7 @@ defineEmits(['retry'])
 // The backend reports free-text progress; map its known messages onto three steps.
 const step = computed(() => {
   const message = props.job.progress || ''
+  if (message.startsWith('Checking')) return 3
   if (message.startsWith('Analysis complete')) return 2
   if (message.startsWith('Analyzing')) return 1
   return 0
@@ -28,6 +29,7 @@ const steps = computed(() => [
   },
   { label: 'Analyze evidence', detail: step.value === 1 ? 'In progress…' : step.value > 1 ? 'Done' : '' },
   { label: 'Write review', detail: step.value === 2 ? 'In progress…' : '' },
+  { label: 'Check citations', detail: step.value === 3 ? 'In progress…' : '' },
 ])
 const elapsedLabel = computed(() => {
   const minutes = Math.floor(props.elapsed / 60)

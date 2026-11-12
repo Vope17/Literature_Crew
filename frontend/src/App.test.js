@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { config as testConfig, flushPromises, mount } from '@vue/test-utils'
 import App from './App.vue'
 
 const paper = {
@@ -7,7 +7,7 @@ const paper = {
   url: 'https://arxiv.org/abs/2501.00001', abstract: 'Abstract',
 }
 const config = {
-  model: 'openai/example', has_api_key: true, max_papers: 5,
+  model: 'openai/example', has_api_key: true, api_verified: true, max_papers: 5,
   search_areas: [{ value: 'all', label: 'All subjects' }, { value: 'computer_science', label: 'Computer science' }],
 }
 const respond = (data, ok = true, headers = {}) => Promise.resolve({
@@ -15,6 +15,7 @@ const respond = (data, ok = true, headers = {}) => Promise.resolve({
 })
 let wrapper
 beforeEach(() => {
+  testConfig.global.stubs.ModelPicker = true
   const values = new Map()
   vi.stubGlobal('localStorage', {
     getItem: key => values.get(key) ?? null,
@@ -23,7 +24,7 @@ beforeEach(() => {
     clear: () => values.clear(),
   })
 })
-afterEach(() => { wrapper?.unmount(); window.localStorage.clear(); vi.unstubAllGlobals(); vi.useRealTimers() })
+afterEach(() => { wrapper?.unmount(); delete testConfig.global.stubs.ModelPicker; window.localStorage.clear(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 it('searches, selects papers, generates a review, and shows coverage', async () => {
   const fetchMock = vi.fn()
@@ -39,9 +40,9 @@ it('searches, selects papers, generates a review, and shows coverage', async () 
   wrapper = mount(App)
   await flushPromises()
   expect(wrapper.get('[data-testid="configured-model"]').text()).toBe('openai/example')
-  expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+  expect(wrapper.find('input[type="password"]').exists()).toBe(true)
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   expect(wrapper.get('input[type="checkbox"]').element.checked).toBe(true)
   await wrapper.findAll('button').find(b => b.text() === 'Generate review').trigger('click')
@@ -64,10 +65,10 @@ it('shows API errors and permits retry', async () => {
   wrapper = mount(App)
   await flushPromises()
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   expect(wrapper.get('[role="alert"]').text()).toBe('arXiv unavailable')
-  expect(wrapper.get('button[type="submit"]').element.disabled).toBe(false)
+  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(false)
 })
 
 it('limits selection to five papers', async () => {
@@ -77,7 +78,7 @@ it('limits selection to five papers', async () => {
   wrapper = mount(App)
   await flushPromises()
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   const boxes = wrapper.findAll('input[type="checkbox"]')
   await boxes[3].setValue(true)
@@ -93,13 +94,13 @@ it('honors the search retry countdown', async () => {
   wrapper = mount(App)
   await flushPromises()
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  expect(wrapper.get('button[type="submit"]').text()).toBe('Retry in 60s')
-  expect(wrapper.get('button[type="submit"]').element.disabled).toBe(true)
+  expect(wrapper.get('.search button[type="submit"]').text()).toBe('Retry in 60s')
+  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(true)
   vi.advanceTimersByTime(60_000)
   await flushPromises()
-  expect(wrapper.get('button[type="submit"]').element.disabled).toBe(false)
+  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(false)
 })
 
 it('labels fallback results and permits review generation', async () => {
@@ -112,7 +113,7 @@ it('labels fallback results and permits review generation', async () => {
   wrapper = mount(App)
   await flushPromises()
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   expect(wrapper.get('.results .warning').text()).toContain('Semantic Scholar')
   expect(wrapper.get('.results .section-heading').text()).toContain('results from Semantic Scholar')
@@ -126,21 +127,30 @@ it('allows searching but disables generation when the server has no key', async 
     .mockImplementationOnce(() => respond({ papers: [paper] })))
   wrapper = mount(App)
   await flushPromises()
-  expect(wrapper.get('.settings .warning').text()).toContain('backend/.env')
+  expect(wrapper.find('[data-testid="api-key"]').exists()).toBe(true)
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   expect(wrapper.findAll('.paper')).toHaveLength(1)
   expect(wrapper.findAll('button').find(b => b.text() === 'Generate review').element.disabled).toBe(true)
 })
 
-it('does not offer or request available models', async () => {
-  const fetchMock = vi.fn(() => respond(config))
+it('submits the chosen model with the report request', async () => {
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => respond(config))
+    .mockImplementationOnce(() => respond({ papers: [paper] }))
+    .mockImplementationOnce(() => respond({ id: 'chosen-job', status: 'queued' }))
+    .mockImplementationOnce(() => respond({ id: 'chosen-job', status: 'completed', review: '# Chosen model', evidence: [] }))
   vi.stubGlobal('fetch', fetchMock)
   wrapper = mount(App)
   await flushPromises()
-  expect(wrapper.text()).not.toContain('Show available models')
-  expect(fetchMock.mock.calls.map(call => call[0])).toEqual(['/api/config'])
+  wrapper.findComponent({ name: 'ModelPicker' }).vm.$emit('update:modelValue', 'openai/chosen')
+  await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
+  await wrapper.get('form.search').trigger('submit')
+  await flushPromises()
+  await wrapper.get('.selection-bar button:last-child').trigger('click')
+  await flushPromises()
+  expect(JSON.parse(fetchMock.mock.calls[2][1].body).model).toBe('openai/chosen')
 })
 
 it('submits filters and preserves the applied summary until the next search', async () => {
@@ -154,7 +164,7 @@ it('submits filters and preserves the applied summary until the next search', as
   await wrapper.get('[data-testid="area-filter"]').setValue('computer_science')
   await wrapper.get('[data-testid="year-from"]').setValue('2020')
   await wrapper.get('[data-testid="year-to"]').setValue('2025')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
     topic: 'graphs', limit: 5, area: 'computer_science', year_from: 2020, year_to: 2025,
@@ -174,9 +184,9 @@ it('rejects reversed year ranges before making a search request', async () => {
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
   await wrapper.get('[data-testid="year-from"]').setValue('2025')
   await wrapper.get('[data-testid="year-to"]').setValue('2020')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   expect(wrapper.get('[role="alert"]').text()).toContain('Start year')
-  expect(wrapper.get('button[type="submit"]').element.disabled).toBe(true)
+  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(true)
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
 
@@ -198,16 +208,16 @@ it('polls review progress while allowing another search, then shows the saved re
   wrapper = mount(App)
   await flushPromises()
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   await wrapper.findAll('button').find(b => b.text() === 'Generate review').trigger('click')
   await flushPromises()
   expect(wrapper.get('.review-progress').text()).toContain('Reading paper 1/1')
-  expect(wrapper.get('button[type="submit"]').element.disabled).toBe(false)
+  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(false)
   expect(wrapper.get('input[placeholder^="e.g."]').element.disabled).toBe(false)
   expect(window.localStorage.getItem('literature-active-review')).toBe('job')
   await wrapper.get('input[placeholder^="e.g."]').setValue('different topic')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   vi.advanceTimersByTime(2000)
   await flushPromises()
@@ -240,7 +250,7 @@ it('shows failed jobs and enables generation again', async () => {
   wrapper = mount(App)
   await flushPromises()
   await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
-  await wrapper.get('form').trigger('submit')
+  await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   const generate = wrapper.findAll('button').find(b => b.text() === 'Generate review')
   await generate.trigger('click')
@@ -372,4 +382,129 @@ it('offers regeneration only for the selection that produced the shown review', 
   expect(action().text()).toBe('Regenerate review')
   await wrapper.findAll('input[type="checkbox"]')[1].setValue(false)
   expect(action().text()).toBe('Generate review')
+})
+
+it('allows subscription CLI generation without an API key and submits study details', async () => {
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => respond({
+      ...config, has_api_key: false, ready: true, model: 'CLI default', ai_backend: 'claude_cli',
+      ai_label: 'Claude Code · Claude subscription', setup_hint: 'Run claude auth login.',
+    }))
+    .mockImplementationOnce(() => respond({ papers: [paper] }))
+    .mockImplementationOnce(() => respond({ id: 'intro', status: 'queued' }))
+    .mockImplementationOnce(() => respond({ id: 'intro', status: 'running' }))
+  vi.stubGlobal('fetch', fetchMock)
+  wrapper = mount(App)
+  await flushPromises()
+  expect(wrapper.get('[data-testid="ai-connection-mode"]').element.value).toBe('claude_cli')
+  await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
+  await wrapper.get('form.search').trigger('submit')
+  await flushPromises()
+  await wrapper.get('[data-testid="output-mode"]').setValue('introduction')
+  await wrapper.get('[data-testid="study-units"]').setValue('chip layouts')
+  await wrapper.get('[data-testid="study-research_question"]').setValue('Does the method transfer?')
+  const generate = wrapper.findAll('button').find(button => button.text() === 'Generate introduction')
+  expect(generate.element.disabled).toBe(false)
+  await generate.trigger('click')
+  await flushPromises()
+  const submitted = JSON.parse(fetchMock.mock.calls[2][1].body)
+  expect(submitted.options.mode).toBe('introduction')
+  expect(submitted.options.units).toBe('chip layouts')
+  expect(submitted.options.research_question).toBe('Does the method transfer?')
+  expect(submitted).not.toHaveProperty('ai_backend')
+  expect(submitted).not.toHaveProperty('api_key')
+})
+
+it('offers the last five calendar years without preventing historical literature searches', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => respond(config)))
+  wrapper = mount(App)
+  await flushPromises()
+  const year = new Date().getFullYear()
+  await wrapper.get('[data-testid="recent-years"]').trigger('click')
+  expect(wrapper.get('[data-testid="year-from"]').element.value).toBe(String(year - 4))
+  expect(wrapper.get('[data-testid="year-to"]').element.value).toBe(String(year))
+  await wrapper.findAll('button').find(button => button.text() === 'Reset filters').trigger('click')
+  expect(wrapper.get('[data-testid="year-from"]').element.value).toBe('')
+  expect(wrapper.get('[data-testid="year-to"]').element.value).toBe('')
+})
+
+it('restores introduction settings and shows citation checks with supplied page links', async () => {
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => respond(config))
+    .mockImplementationOnce(() => respond({ items: [{
+      id: 'intro', kind: 'review', topic: 'graphs', status: 'completed', paper_count: 1,
+      output_mode: 'introduction', created_at: '2026-01-01T00:00:00Z',
+    }], has_more: false }))
+    .mockImplementationOnce(() => respond({
+      id: 'intro', kind: 'review', topic: 'graphs', status: 'completed', papers: [paper],
+      options: { mode: 'introduction', units: 'chip layouts' },
+      review: '# Introduction\nEvidence [P1, p. 7]. [待補：研究目標]',
+      evidence: [{ id: 'P1', title: paper.title, coverage: 'sampled PDF' }],
+      checks: [{ name: 'Evidence completeness', status: 'warning', details: 'Limited text coverage: P1.' }],
+    }))
+  vi.stubGlobal('fetch', fetchMock)
+  wrapper = mount(App)
+  await flushPromises()
+  await wrapper.get('[data-testid="history-toggle"]').trigger('click')
+  await flushPromises()
+  await wrapper.get('.history-item').trigger('click')
+  await flushPromises()
+  expect(wrapper.get('[data-testid="output-mode"]').element.value).toBe('introduction')
+  expect(wrapper.get('[data-testid="study-units"]').element.value).toBe('chip layouts')
+  expect(wrapper.get('.report-head h2').text()).toBe('Introduction: graphs')
+  expect(wrapper.get('.markdown a.cite').text()).toBe('P1, p. 7')
+  expect(wrapper.get('.report-checks').text()).toContain('Limited text coverage')
+  expect(wrapper.get('.selection-bar button:last-child').text()).toBe('Regenerate introduction')
+  await wrapper.get('[data-testid="study-units"]').setValue('different units')
+  expect(wrapper.get('.selection-bar button:last-child').text()).toBe('Generate introduction')
+  expect(fetchMock.mock.calls.every(call => !call[1]?.method)).toBe(true)
+})
+
+it('enables Codex generation only after the frontend login completes', async () => {
+  vi.useFakeTimers()
+  let connected = false
+  let started = false
+  vi.stubGlobal('fetch', vi.fn(path => {
+    if (path === '/api/config') return respond({ ...config, ready: true, has_api_key: false, ai_backend: 'codex_cli' })
+    if (path === '/api/search') return respond({ papers: [paper] })
+    if (path === '/api/auth/chatgpt/start') {
+      started = true
+      return respond({ status: 'pending', connected: false, user_code: 'ABCD-1234', verification_url: 'https://auth.openai.com/codex/device' })
+    }
+    if (path === '/api/auth/chatgpt') return respond({ status: connected ? 'connected' : started ? 'pending' : 'disconnected', connected, plan: connected ? 'plus' : null })
+    throw new Error(`Unexpected request ${path}`)
+  }))
+  wrapper = mount(App)
+  await flushPromises()
+  await wrapper.get('input[placeholder^="e.g."]').setValue('graphs')
+  await wrapper.get('form.search').trigger('submit')
+  await flushPromises()
+  expect(wrapper.get('.selection-bar button:last-child').element.disabled).toBe(true)
+  await wrapper.get('[data-testid="chatgpt-connect"]').trigger('click')
+  await flushPromises()
+  connected = true
+  await vi.advanceTimersByTimeAsync(2000)
+  await flushPromises()
+  expect(wrapper.get('.selection-bar button:last-child').element.disabled).toBe(false)
+  expect(wrapper.get('.connection-status').text()).toContain('connected')
+})
+
+it('keeps appearance and AI in gear settings and verifies API before enabling models', async () => {
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => respond({ ...config, has_api_key: false, api_verified: false, ready: false }))
+    .mockImplementationOnce(() => respond({ ...config, ai_backend: 'openai_api', api_verified: true, ready: true }))
+  vi.stubGlobal('fetch', fetchMock)
+  wrapper = mount(App)
+  await flushPromises()
+  expect(wrapper.get('summary[aria-label="設定"]').text()).toContain('設定')
+  expect(wrapper.get('.settings .theme-picker').exists()).toBe(true)
+  expect(wrapper.findComponent({ name: 'ModelPicker' }).props('enabled')).toBe(false)
+  await wrapper.get('[data-testid="api-key"]').setValue('private-api-key')
+  await wrapper.get('.api-connection').trigger('submit')
+  await flushPromises()
+  expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ backend: 'openai_api', api_key: 'private-api-key' })
+  expect(wrapper.get('[data-testid="api-key"]').element.value).toBe('')
+  expect(wrapper.findComponent({ name: 'ModelPicker' }).props('enabled')).toBe(true)
+  await wrapper.get('[data-testid="api-key"]').setValue('replacement-key')
+  expect(wrapper.findComponent({ name: 'ModelPicker' }).props('enabled')).toBe(false)
 })

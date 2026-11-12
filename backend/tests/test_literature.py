@@ -67,7 +67,7 @@ def test_review_requires_key_before_retrieval(paper):
         literature.generate_review("graphs", [paper], "")
 
 
-def test_crew_wiring_and_source_export(monkeypatch, paper):
+def test_crew_wiring_and_source_export(monkeypatch, paper, analysis_notes):
     import crewai
 
     monkeypatch.setattr(literature, "extract_pdf", lambda _: ("[Page 1] Evidence", False))
@@ -76,6 +76,7 @@ def test_crew_wiring_and_source_export(monkeypatch, paper):
     def kickoff(self, inputs):
         captured["crew"] = self
         captured["inputs"] = inputs
+        self.tasks[0].callback(SimpleNamespace(pydantic=analysis_notes))
         return SimpleNamespace(raw="# Review\nA finding [P1].")
 
     monkeypatch.setattr(crewai.Crew, "kickoff", kickoff)
@@ -84,10 +85,11 @@ def test_crew_wiring_and_source_export(monkeypatch, paper):
     assert captured["crew"].agents[0].llm.temperature is None
     assert captured["crew"].agents[0].llm.timeout == 120
     assert captured["crew"].tasks[1].context == [captured["crew"].tasks[0]]
-    assert "[Page 1] Evidence" in captured["inputs"]["evidence"]
+    assert "[Page 1] Evidence" in captured["inputs"]["analysis_prompt"]
     assert paper.url in review
     assert "full PDF" in review
     assert evidence[0]["doi"] is None
+    assert evidence[0]["analysis"]["findings"][0]["kind"] == "reported"
 
 
 def test_pdf_is_stored_and_reused_without_network(monkeypatch, paper, tmp_path):
@@ -114,3 +116,49 @@ def test_scanned_pdf_is_saved_but_evidence_uses_abstract(monkeypatch, paper, tmp
     assert item["coverage"] == "abstract only"
     assert item["stored_pdf_url"]
     assert store.get_pdf(url=paper.pdf_url) == data
+
+
+def test_long_pdf_keeps_ending_and_middle_sections_within_budget(monkeypatch):
+    monkeypatch.setattr(literature, "MAX_TEXT_CHARS", 1800)
+    pages = [(i, ("Introduction\n" if i == 1 else "") + "Background text. " * 200) for i in range(1, 21)]
+    pages[9] = (10, "Results\nContradictory result in the middle. " + "More evidence. " * 200)
+    pages[-1] = (20, "Limitations\nThe method fails on unseen graphs. " + "More limitations. " * 200)
+    text, sampled = literature.sample_pages(pages)
+    assert sampled and len(text) <= 1800
+    assert "[Page 1]" in text and "[Page 20]" in text
+    assert "Contradictory result" in text and "fails on unseen graphs" in text
+
+
+@pytest.mark.parametrize("backend", ["codex_cli", "claude_cli"])
+def test_cli_uses_validated_analysis_before_writing_without_api_key(monkeypatch, paper, analysis_notes, backend):
+    calls = []
+    monkeypatch.setattr(literature, "require_cli_login", lambda value: calls.append(value))
+    monkeypatch.setattr(literature, "extract_pdf", lambda _: ("[Page 1] Evidence", False))
+
+    def cli(value, prompt, **kwargs):
+        calls.append((value, prompt, kwargs))
+        return analysis_notes.model_dump_json() if kwargs.get("schema") else "# Review\nA finding [P1, p. 1]."
+
+    monkeypatch.setattr(literature, "run_cli", cli)
+    review, evidence = literature.generate_review("graphs", [paper], backend=backend, model="")
+    assert calls[0] == backend and len(calls) == 3
+    assert calls[1][2]["schema"]["type"] == "object"
+    assert "Validated analysis JSON" in calls[2][1]
+    assert "Sources and coverage" in review
+    assert evidence[0]["analysis"]["paper_id"] == "P1"
+
+
+def test_invalid_analysis_stops_before_writing(monkeypatch, paper, analysis_notes):
+    monkeypatch.setattr(literature, "require_cli_login", lambda _: None)
+    monkeypatch.setattr(literature, "extract_pdf", lambda _: ("[Page 1] Evidence", False))
+    analysis_notes.papers[0].findings[0].citations[0].page = 99
+    calls = []
+
+    def cli(*args, **kwargs):
+        calls.append(args)
+        return analysis_notes.model_dump_json()
+
+    monkeypatch.setattr(literature, "run_cli", cli)
+    with pytest.raises(ValueError, match="outside"):
+        literature.generate_review("graphs", [paper], backend="codex_cli", model="")
+    assert len(calls) == 1

@@ -31,11 +31,11 @@ const toc = computed(() => {
 })
 const html = computed(() => {
   const rendered = markdown.render(props.result.review || '')
-  // Turn citations such as [P1] or [P1, P2] into links to the coverage table.
-  const linked = rendered.replace(/\[(P\d+(?:\s*[,;]\s*P\d+)*)\]/g, (match, list) => {
+  // Keep the supplied page visible while linking the citation to source evidence.
+  const linked = rendered.replace(/\[(P\d+(?:\s*[,;]\s*P\d+)*)(?:,\s*p\.\s*(\d+))?\]/g, (match, list, page) => {
     const ids = list.split(/\s*[,;]\s*/)
     if (!ids.every(id => sourceIds.value.has(id))) return match
-    return ids.map(id => `<a class="cite" href="#source-${id}">${id}</a>`).join(' ')
+    return ids.map(id => `<a class="cite" href="#source-${id}">${id}${page ? `, p. ${page}` : ''}</a>`).join(' ')
   })
   return DOMPurify.sanitize(linked)
 })
@@ -95,13 +95,23 @@ function download(content, filename, type) {
     </div>
     <article class="panel report-body">
       <div class="report-head">
-        <h2>{{ result.topic ? `Review: ${result.topic}` : 'Your literature review' }}</h2>
+        <h2>{{ result.options?.mode === 'introduction' ? `Introduction: ${result.topic}` : result.topic ? `Review: ${result.topic}` : 'Your literature review' }}</h2>
         <div class="downloads">
           <button class="secondary" @click="download(result.review, 'review.md', 'text/markdown')">Markdown ↓</button>
           <button class="secondary" @click="download(JSON.stringify(evidence, null, 2), 'evidence.json', 'application/json')">Evidence JSON ↓</button>
         </div>
       </div>
-      <p class="muted">Saved review<span v-if="result.model"> · {{ result.model }}</span>. Check claims against the original papers.</p>
+      <p class="muted">Saved report<span v-if="result.ai_backend"> · {{ result.ai_backend }}</span><span v-if="result.model"> · {{ result.model }}</span>. Check claims against the original papers.</p>
+
+      <details v-if="result.checks?.length" class="report-checks">
+        <summary>Evidence checks · {{ result.checks.filter(check => check.status === 'warning').length }} need review</summary>
+        <ul>
+          <li v-for="check in result.checks" :key="check.name" :class="check.status">
+            <strong>{{ check.name }}</strong>: {{ check.details }}
+          </li>
+        </ul>
+        <p class="muted">These checks verify citation IDs, supplied page numbers and text coverage. Confirm claim support and writing quality against the original papers.</p>
+      </details>
 
       <div v-if="evidence.length" id="sources" class="sources saved-pdfs">
         <h3>Sources &amp; coverage</h3>

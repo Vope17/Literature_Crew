@@ -9,11 +9,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from typing import Literal
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, PermissionDeniedError, RateLimitError
 
 from literature import MAX_PAPERS, Paper, generate_review, search_papers
@@ -23,6 +24,10 @@ from semantic_search import search_semantic_scholar
 from search_filters import AREAS, SearchFilters
 from storage import HistoryStore
 from review_jobs import ReviewJobs
+from ai_backend import AIBackendError, AISettings, get_settings, require_cli_login
+from ai_sessions import AISessions, COOKIE_NAME, SESSION_SECONDS
+from chatgpt_login import ChatGPTLogin
+from review_guidelines import ReviewOptions
 
 BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(BACKEND_DIR / ".env")
@@ -37,9 +42,13 @@ async def lifespan(app):
     app.state.store = HistoryStore(path)
     app.state.store.recover_interrupted()
     app.state.jobs = ReviewJobs(app.state.store)
+    app.state.chatgpt_login = ChatGPTLogin()
+    app.state.ai_sessions = AISessions()
     try:
         yield
     finally:
+        app.state.ai_sessions.clear()
+        await app.state.chatgpt_login.close()
         await asyncio.to_thread(app.state.jobs.shutdown)
 
 
@@ -81,6 +90,36 @@ class ReviewRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     topic: str = Field(min_length=1, max_length=500)
     papers: list[PaperInput] = Field(min_length=1, max_length=MAX_PAPERS)
+    options: ReviewOptions = Field(default_factory=ReviewOptions)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    connection_id: str | None = Field(default=None, max_length=128)
+
+
+class ConnectionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    backend: Literal["openai_api", "codex_cli", "claude_cli"]
+    api_key: SecretStr | None = Field(default=None, max_length=1024)
+
+
+def effective_settings(request: Request):
+    return app.state.ai_sessions.get(request.cookies.get(COOKIE_NAME)) or get_settings()
+
+
+def check_connection(request, identifier):
+    if identifier is not None and identifier != app.state.ai_sessions.identifier(request.cookies.get(COOKIE_NAME)):
+        raise HTTPException(409, "AI connection expired or changed. Reconnect in settings.")
+
+
+def connection_config(settings, verified=False):
+    return {**settings.public_config(), "api_verified": verified and settings.backend == "openai_api",
+            "connection_verified": verified}
+
+
+def require_ui_origin(request: Request):
+    origin = urlsplit(request.headers.get("origin", ""))
+    if (origin.scheme not in ("http", "https") or origin.netloc != request.headers.get("host")
+            or request.headers.get("content-type", "").split(";")[0] != "application/json"):
+        raise HTTPException(403, "Use the settings panel on this application's page.")
 
 
 @app.exception_handler(RequestValidationError)
@@ -90,10 +129,11 @@ async def validation_error(request, exc):
 
 
 @app.get("/api/config")
-def config():
+def config(request: Request):
+    session = app.state.ai_sessions.get(request.cookies.get(COOKIE_NAME))
     return {
-        "model": os.getenv("MODEL", "").strip(),
-        "has_api_key": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+        **connection_config(session or get_settings(), verified=session is not None),
+        "connection_id": app.state.ai_sessions.identifier(request.cookies.get(COOKIE_NAME)),
         "max_papers": MAX_PAPERS,
         "search_areas": [{"value": value, "label": details[0]} for value, details in AREAS.items()],
     }
@@ -145,13 +185,61 @@ def search(body: SearchRequest):
         raise HTTPException(502, "Unexpected search error. Check the backend log for details.") from None
 
 
+async def chatgpt_auth_response(request: Request, action: str):
+    if effective_settings(request).backend != "codex_cli":
+        raise HTTPException(409, "ChatGPT sign-in requires AI_BACKEND=codex_cli on the backend.")
+    if action != "status":
+        require_ui_origin(request)
+    try:
+        result = await getattr(app.state.chatgpt_login, action)()
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except AIBackendError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=503, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/auth/chatgpt")
+async def chatgpt_auth_status(request: Request):
+    return await chatgpt_auth_response(request, "status")
+
+
+@app.post("/api/auth/chatgpt/start")
+async def chatgpt_auth_start(request: Request):
+    return await chatgpt_auth_response(request, "start")
+
+
+@app.post("/api/auth/chatgpt/cancel")
+async def chatgpt_auth_cancel(request: Request):
+    return await chatgpt_auth_response(request, "cancel")
+
+
 @app.get("/api/models")
-def models():
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+async def models(request: Request, connection_id: str | None = None):
+    check_connection(request, connection_id)
+    settings = effective_settings(request)
+    if settings.backend == "codex_cli":
+        try:
+            return {"models": await app.state.chatgpt_login.models(),
+                    "notice": "Model access is confirmed when generation runs."}
+        except AIBackendError as exc:
+            raise HTTPException(503, str(exc)) from None
+    if settings.backend == "claude_cli":
+        try:
+            await asyncio.to_thread(require_cli_login, "claude_cli")
+        except AIBackendError as exc:
+            raise HTTPException(503, str(exc)) from None
+        return {"models": [{"id": name, "name": name.title()} for name in ("sonnet", "opus", "haiku")],
+                "notice": "Claude Code aliases. Model access depends on your account."}
+    if settings.backend != "openai_api":
+        raise HTTPException(400, "Check AI_BACKEND in backend/.env.")
+    api_key = settings.api_key
     if not api_key:
         raise HTTPException(400, "Set OPENAI_API_KEY in backend/.env and restart the backend to load models.")
+    return {"models": await api_models(api_key)}
+
+
+async def api_models(api_key):
     try:
-        return {"models": list_models(api_key)}
+        return await asyncio.to_thread(list_models, api_key)
     except AuthenticationError:
         raise HTTPException(401, "OpenAI rejected the API key. Check it and reload models.") from None
     except PermissionDeniedError:
@@ -166,16 +254,55 @@ def models():
         raise HTTPException(502, "OpenAI could not list models. Please retry later.") from None
 
 
+@app.post("/api/ai/connection")
+async def set_ai_connection(body: ConnectionInput, request: Request):
+    require_ui_origin(request)
+    current = effective_settings(request)
+    if body.backend == "openai_api":
+        key = body.api_key.get_secret_value().strip() if body.api_key else ""
+        key = key or current.api_key or os.getenv("OPENAI_API_KEY", "").strip()
+        if not key:
+            raise HTTPException(400, "Enter an OpenAI API key.")
+        catalog = await api_models(key)
+        if not catalog:
+            raise HTTPException(400, "The API key returned no supported text models.")
+        default = os.getenv("MODEL", "").strip()
+        if default not in {item["id"] for item in catalog}:
+            default = catalog[0]["id"]
+        settings = AISettings("openai_api", default, key)
+    else:
+        settings = AISettings(body.backend, os.getenv("CLI_MODEL", "").strip(), "", current.timeout)
+        if error := settings.setup_error():
+            raise HTTPException(400, error)
+        if body.backend == "claude_cli":
+            try:
+                await asyncio.to_thread(require_cli_login, "claude_cli")
+            except AIBackendError as exc:
+                raise HTTPException(503, str(exc)) from None
+    token = app.state.ai_sessions.set(request.cookies.get(COOKIE_NAME), settings)
+    payload = {**connection_config(settings, verified=True), "connection_id": app.state.ai_sessions.identifier(token)}
+    response = JSONResponse(payload, headers={"Cache-Control": "no-store"})
+    response.set_cookie(COOKIE_NAME, token, max_age=SESSION_SECONDS, httponly=True,
+                        secure=urlsplit(request.headers.get("origin", "")).scheme == "https", samesite="strict", path="/api")
+    return response
+
+
 @app.post("/api/review", status_code=202)
-def review(body: ReviewRequest):
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    model = os.getenv("MODEL", "").strip()
-    if not api_key:
-        raise HTTPException(400, "Set OPENAI_API_KEY in backend/.env and restart the backend first.")
-    if not model:
-        raise HTTPException(400, "Set MODEL in backend/.env and restart the backend first.")
+async def review(body: ReviewRequest, request: Request):
+    check_connection(request, body.connection_id)
+    settings = effective_settings(request)
+    error = settings.setup_error()
+    if error and not (body.model and settings.backend == "openai_api" and settings.api_key and not settings.model):
+        raise HTTPException(400, error)
+    selected_model = settings.model
+    if body.model is not None:
+        catalog = await models(request)
+        if body.model not in {item["id"] for item in catalog["models"]}:
+            raise HTTPException(400, "Selected model is not in the current model list. Refresh models and select again.")
+        selected_model = body.model
     record_id = app.state.jobs.submit(body.topic, [Paper(**paper.model_dump()) for paper in body.papers],
-                                     api_key, model, generate_review)
+                                     settings.api_key, selected_model, generate_review,
+                                     backend=settings.backend, cli_timeout=settings.timeout, options=body.options)
     return {"id": record_id, "status": "queued"}
 
 

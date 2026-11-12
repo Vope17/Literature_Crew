@@ -14,6 +14,7 @@ def isolated_history(monkeypatch, tmp_path):
     global client
     monkeypatch.setenv("HISTORY_DB_PATH", str(tmp_path / "history.sqlite3"))
     monkeypatch.setenv("MODEL", "openai/example")
+    monkeypatch.setenv("AI_BACKEND", "openai_api")
     with TestClient(app.app) as client:
         yield
 
@@ -202,7 +203,7 @@ def test_models_auth_error_is_safe(monkeypatch):
     assert "secret-key" not in response.text
 
 
-@pytest.mark.parametrize("override", [{"api_key": "browser-secret"}, {"model": "openai/browser-model"}])
+@pytest.mark.parametrize("override", [{"api_key": "browser-secret"}])
 def test_browser_cannot_override_server_credentials(monkeypatch, paper, override):
     monkeypatch.setenv("OPENAI_API_KEY", "server-secret")
     response = client.post("/api/review", json={"topic": "graphs", "papers": [asdict(paper)], **override})
@@ -249,7 +250,7 @@ def test_background_review_returns_before_generation_and_reports_progress(monkey
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     entered, release = Event(), Event()
 
-    def generate(topic, papers, key, model, *, progress, pdf_store):
+    def generate(topic, papers, key, model, *, progress, pdf_store, **kwargs):
         progress("Reading paper 1/1")
         entered.set()
         assert release.wait(5)
@@ -289,3 +290,162 @@ def test_saved_pdf_download_and_missing_records():
     assert "attachment" in response.headers["content-disposition"]
     for path in ("history/missing", "reviews/missing", "pdfs/missing"):
         assert client.get(f"/api/{path}").status_code == 404
+
+
+@pytest.mark.parametrize("backend", ["codex_cli", "claude_cli"])
+def test_cli_review_without_api_key_saves_study_options(monkeypatch, paper, backend):
+    import ai_backend
+
+    monkeypatch.setenv("AI_BACKEND", backend)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CLI_MODEL", raising=False)
+    monkeypatch.setattr(ai_backend.shutil, "which", lambda _: "/usr/bin/cli")
+
+    def generate(topic, papers, key, model, **kwargs):
+        assert key == model == ""
+        assert kwargs["backend"] == backend
+        assert kwargs["options"].mode == "introduction"
+        assert kwargs["options"].units == "chip layouts"
+        return "# Introduction\n[待補：研究問題] [P1]", [{"id": "P1", "text": "Abstract", "coverage": "abstract only"}]
+
+    monkeypatch.setattr(app, "generate_review", generate)
+    config = client.get("/api/config").json()
+    assert config["ready"] is True and config["has_api_key"] is False
+    response = client.post("/api/review", json={
+        "topic": "graphs", "papers": [asdict(paper)],
+        "options": {"mode": "introduction", "units": "chip layouts"},
+    })
+    assert response.status_code == 202
+    saved = wait_for_review(response.json()["id"])
+    assert saved["status"] == "completed"
+    assert saved["ai_backend"] == backend
+    assert saved["options"]["units"] == "chip layouts"
+    assert saved["checks"][2]["status"] == "warning"
+    assert client.get(f"/api/history/{saved['id']}").json()["options"] == saved["options"]
+
+
+def test_browser_cannot_override_backend_inside_options(paper):
+    response = client.post("/api/review", json={
+        "topic": "graphs", "papers": [asdict(paper)], "options": {"ai_backend": "codex_cli"},
+    })
+    assert response.status_code == 422
+
+
+def test_chatgpt_signin_routes_require_same_origin_and_hide_credentials(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AI_BACKEND", "codex_cli")
+    manager = app.app.state.chatgpt_login
+    monkeypatch.setattr(manager, "status", AsyncMock(return_value={"status": "disconnected", "connected": False}))
+    monkeypatch.setattr(manager, "start", AsyncMock(return_value={
+        "status": "pending", "connected": False, "verification_url": "https://auth.openai.com/codex/device", "user_code": "ABCD-1234",
+    }))
+    monkeypatch.setattr(manager, "cancel", AsyncMock(return_value={"status": "disconnected", "connected": False}))
+    assert client.get("/api/auth/chatgpt").headers["cache-control"] == "no-store"
+    for origin in (None, "https://evil.example"):
+        headers = {"Origin": origin} if origin else {}
+        assert client.post("/api/auth/chatgpt/start", json={}, headers=headers).status_code == 403
+    assert not manager.start.called
+    headers = {"Origin": "http://testserver"}
+    started = client.post("/api/auth/chatgpt/start", json={}, headers=headers)
+    assert started.status_code == 200 and started.json()["user_code"] == "ABCD-1234"
+    assert "token" not in started.text.lower()
+    assert client.post("/api/auth/chatgpt/cancel", json={}, headers=headers).json()["status"] == "disconnected"
+    monkeypatch.setenv("AI_BACKEND", "openai_api")
+    assert client.get("/api/auth/chatgpt").status_code == 409
+
+
+def test_selected_api_model_is_validated_used_and_saved(monkeypatch, paper):
+    monkeypatch.setenv("OPENAI_API_KEY", "server-secret")
+    monkeypatch.setenv("MODEL", "")
+    monkeypatch.setattr(app, "list_models", lambda key: [{"id": "openai/chosen", "name": "Chosen"}])
+
+    def generate(topic, papers, key, model, **kwargs):
+        assert key == "server-secret" and model == "openai/chosen"
+        return "Report", []
+
+    monkeypatch.setattr(app, "generate_review", generate)
+    body = {"topic": "graphs", "papers": [asdict(paper)], "model": "openai/chosen"}
+    response = client.post("/api/review", json=body)
+    assert response.status_code == 202
+    assert wait_for_review(response.json()["id"])["model"] == "openai/chosen"
+    body["model"] = "openai/not-in-catalog"
+    assert client.post("/api/review", json=body).status_code == 400
+
+
+def test_subscription_model_selection_uses_native_model_id(monkeypatch, paper):
+    from unittest.mock import AsyncMock
+    monkeypatch.setenv("AI_BACKEND", "codex_cli")
+    monkeypatch.setattr(app.app.state.chatgpt_login, "models", AsyncMock(return_value=[{"id": "chosen", "name": "Chosen"}]))
+    import ai_backend
+    monkeypatch.setattr(ai_backend.shutil, "which", lambda _: "/usr/bin/codex")
+
+    def generate(topic, papers, key, model, **kwargs):
+        assert key == "" and model == "chosen" and kwargs["backend"] == "codex_cli"
+        return "Report", []
+
+    monkeypatch.setattr(app, "generate_review", generate)
+    assert client.get("/api/models").json()["models"][0]["id"] == "chosen"
+    response = client.post("/api/review", json={"topic": "graphs", "papers": [asdict(paper)], "model": "chosen"})
+    assert response.status_code == 202
+    assert wait_for_review(response.json()["id"])["model"] == "chosen"
+
+
+def test_ui_api_key_is_verified_session_scoped_and_used_without_disclosure(monkeypatch, paper):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    keys = []
+
+    def catalog(key):
+        keys.append(key)
+        return [{"id": "openai/chosen", "name": "Chosen"}]
+
+    monkeypatch.setattr(app, "list_models", catalog)
+    headers = {"Origin": "http://testserver"}
+    response = client.post("/api/ai/connection", json={"backend": "openai_api", "api_key": "private-input-key"}, headers=headers)
+    assert response.status_code == 200 and response.json()["api_verified"] is True
+    assert response.headers["cache-control"] == "no-store"
+    assert "HttpOnly" in response.headers["set-cookie"] and "SameSite=strict" in response.headers["set-cookie"]
+    assert "private-input-key" not in response.text
+    assert client.get("/api/config").json()["api_verified"] is True
+
+    def generate(topic, papers, key, model, **kwargs):
+        assert key == "private-input-key" and model == "openai/chosen"
+        return "Report", []
+
+    monkeypatch.setattr(app, "generate_review", generate)
+    job = client.post("/api/review", json={"topic": "graphs", "papers": [asdict(paper)], "model": "openai/chosen"})
+    saved = wait_for_review(job.json()["id"])
+    assert saved["status"] == "completed" and "private-input-key" not in str(saved)
+    assert keys == ["private-input-key", "private-input-key"]
+    identifier = response.json()["connection_id"]
+    app.app.state.ai_sessions.clear()
+    expired = client.post("/api/review", json={"topic": "graphs", "papers": [asdict(paper)], "connection_id": identifier})
+    assert expired.status_code == 409
+    client.cookies.clear()
+    assert client.get("/api/config").json()["api_verified"] is False
+    assert client.get("/api/config").json()["has_api_key"] is False
+
+
+def test_ui_connection_rejects_cross_origin_and_keeps_working_key_after_failed_validation(monkeypatch):
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(app, "api_models", AsyncMock(return_value=[{"id": "openai/chosen", "name": "Chosen"}]))
+    body = {"backend": "openai_api", "api_key": "working-key"}
+    assert client.post("/api/ai/connection", json=body).status_code == 403
+    headers = {"Origin": "http://testserver"}
+    assert client.post("/api/ai/connection", json=body, headers=headers).status_code == 200
+    monkeypatch.setattr(app, "api_models", AsyncMock(side_effect=app.HTTPException(401, "Invalid API key")))
+    response = client.post("/api/ai/connection", json={"backend": "openai_api", "api_key": "bad-key"}, headers=headers)
+    assert response.status_code == 401 and "bad-key" not in response.text
+    assert client.get("/api/config").json()["api_verified"] is True
+
+
+def test_browser_can_switch_to_subscription_without_changing_server_environment(monkeypatch):
+    import ai_backend
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(ai_backend.shutil, "which", lambda _: "/usr/bin/codex")
+    monkeypatch.setattr(app.app.state.chatgpt_login, "status", AsyncMock(return_value={"status": "connected", "connected": True}))
+    response = client.post("/api/ai/connection", json={"backend": "codex_cli"}, headers={"Origin": "http://testserver"})
+    assert response.status_code == 200 and response.json()["ai_backend"] == "codex_cli"
+    assert client.get("/api/auth/chatgpt").json()["connected"] is True
+    client.cookies.clear()
+    assert client.get("/api/config").json()["ai_backend"] == "openai_api"

@@ -2,6 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import ReportView from './ReportView.vue'
 import ReviewProgress from './ReviewProgress.vue'
+import ReviewOptions from './ReviewOptions.vue'
+import ChatGPTLogin from './ChatGPTLogin.vue'
+import ModelPicker from './ModelPicker.vue'
+import ThemePicker from './ThemePicker.vue'
+import { defaultReviewOptions } from './reviewOptions'
 
 const topic = ref('')
 const searchedTopic = ref('')
@@ -24,7 +29,22 @@ const filterError = computed(() => {
 const papers = ref([])
 const selected = ref([])
 const model = ref('')
+const selectedModel = ref('')
 const hasServerKey = ref(false)
+const connectionMode = ref('openai_api')
+const connectionId = ref('')
+const connectionBusy = ref(false)
+const connectionError = ref('')
+const apiKey = ref('')
+const apiVerified = ref(false)
+const claudeConnected = ref(false)
+const settingsOpen = ref(false)
+const aiBackend = ref('openai_api')
+const aiLabel = ref('OpenAI API')
+const aiReady = ref(false)
+const chatgptConnected = ref(false)
+const setupHint = ref('Set OPENAI_API_KEY and MODEL in backend/.env, then restart the backend.')
+const reviewOptions = ref(defaultReviewOptions())
 const maxPapers = ref(5)
 const busy = ref('')
 const error = ref('')
@@ -54,12 +74,25 @@ const expandedAbstracts = ref([])
 const historyKind = ref('all')
 const visibleHistory = computed(() => historyKind.value === 'all'
   ? historyItems.value : historyItems.value.filter(item => item.kind === historyKind.value))
-const configured = computed(() => !!model.value && hasServerKey.value)
+const configured = computed(() => {
+  if (connectionMode.value !== aiBackend.value || connectionBusy.value) return false
+  if (aiBackend.value === 'openai_api') return apiVerified.value && hasServerKey.value && (aiReady.value || !!selectedModel.value)
+  if (aiBackend.value === 'codex_cli') return aiReady.value && chatgptConnected.value
+  return aiReady.value && claudeConnected.value
+})
+const canLoadModels = computed(() => configured.value)
 const selectedPapers = computed(() => selected.value.map(i => papers.value[i]).filter(Boolean))
+const generateLabel = computed(() => {
+  const name = reviewOptions.value.mode === 'introduction' ? 'introduction' : 'review'
+  return `${alreadyGenerated.value ? 'Regenerate' : 'Generate'} ${name}`
+})
 // The shown review was generated from exactly the current topic and selection.
 const alreadyGenerated = computed(() => {
   const reviewed = result.value?.papers
   if (!reviewed?.length || result.value.topic !== searchedTopic.value) return false
+  if (result.value.ai_backend && result.value.ai_backend !== aiBackend.value) return false
+  if (selectedModel.value && result.value.model !== selectedModel.value) return false
+  if (JSON.stringify({ ...defaultReviewOptions(), ...result.value.options }) !== JSON.stringify(reviewOptions.value)) return false
   const urls = new Set(reviewed.map(paper => paper.url))
   return urls.size === selectedPapers.value.length && selectedPapers.value.every(paper => urls.has(paper.url))
 })
@@ -77,14 +110,14 @@ const filterChips = computed(() => {
 
 async function request(path, body) {
   let response
-  const signal = AbortSignal.timeout(path === 'search' ? 180_000 : 15_000)
+  const signal = AbortSignal.timeout(path === 'search' ? 180_000 : path === 'ai/connection' ? 60_000 : 15_000)
   try {
     response = await fetch(`/api/${path}`, body ? {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal,
-    } : { signal })
+    } : { signal, cache: 'no-store' })
   } catch {
     throw new Error('Cannot reach the server. Check that the Python backend is running.')
   }
@@ -98,12 +131,65 @@ async function request(path, body) {
   return data
 }
 
+function applyConnection(config) {
+  connectionId.value = config.connection_id || ''
+  model.value = config.model
+  hasServerKey.value = config.has_api_key
+  aiBackend.value = config.ai_backend || 'openai_api'
+  connectionMode.value = aiBackend.value
+  aiLabel.value = config.ai_label || 'OpenAI API'
+  aiReady.value = config.ready ?? (!!config.model && !!config.has_api_key)
+  apiVerified.value = config.api_verified === true
+  claudeConnected.value = config.connection_verified ?? config.ready ?? false
+  chatgptConnected.value = false
+  selectedModel.value = ''
+  setupHint.value = config.setup_hint || setupHint.value
+}
+
+async function switchConnection() {
+  connectionError.value = ''
+  apiVerified.value = false
+  selectedModel.value = ''
+  if (connectionMode.value === 'openai_api') return
+  apiKey.value = ''
+  await connectAI()
+}
+
+async function connectAI() {
+  if (connectionBusy.value) return
+  connectionBusy.value = true
+  connectionError.value = ''
+  try {
+    const config = await request('ai/connection', {
+      backend: connectionMode.value,
+      ...(connectionMode.value === 'openai_api' && apiKey.value.trim() ? { api_key: apiKey.value.trim() } : {}),
+    })
+    applyConnection(config)
+    apiKey.value = ''
+  } catch (err) {
+    connectionError.value = err.message
+  } finally {
+    connectionBusy.value = false
+  }
+}
+
+function editingApiKey() {
+  apiVerified.value = false
+  selectedModel.value = ''
+}
+
+function modelConnectionError(message) {
+  apiVerified.value = false
+  claudeConnected.value = false
+  chatgptConnected.value = false
+  connectionError.value = message
+}
+
 onMounted(async () => {
   retryTimer = setInterval(() => { now.value = Date.now() }, 1000)
   try {
     const config = await request('config')
-    model.value = config.model
-    hasServerKey.value = config.has_api_key
+    applyConnection(config)
     maxPapers.value = config.max_papers
     areas.value = config.search_areas || areas.value
   } catch (err) {
@@ -226,6 +312,7 @@ async function openHistory(id) {
       result.value = null
     } else if (saved.status === 'completed') {
       result.value = saved
+      reviewOptions.value = { ...defaultReviewOptions(), ...saved.options }
     } else if (saved.status === 'failed') {
       result.value = null
       reviewError.value = saved.error
@@ -275,8 +362,8 @@ async function search() {
 
 async function generate() {
   if (busy.value || activeReview.value || !selected.value.length) return
-  if (!model.value || !hasServerKey.value) {
-    error.value = 'Set OPENAI_API_KEY and MODEL in backend/.env, then restart the backend.'
+  if (!configured.value) {
+    error.value = setupHint.value
     return
   }
   busy.value = 'Queuing your review…'
@@ -287,6 +374,9 @@ async function generate() {
     const job = await request('review', {
       topic: searchedTopic.value,
       papers: selectedPapers.value,
+      options: reviewOptions.value,
+      ...(connectionId.value ? { connection_id: connectionId.value } : {}),
+      ...(selectedModel.value ? { model: selectedModel.value } : {}),
     })
     activeReview.value = {
       ...job, topic: searchedTopic.value, papers: selectedPapers.value, progress: 'Waiting to generate the review…',
@@ -295,7 +385,12 @@ async function generate() {
     // Each status request is short; the crew runs independently on the backend.
     void pollReview(job.id)
   } catch (err) {
-    error.value = err.message
+    if ([401, 403, 409].includes(err.status)) {
+      modelConnectionError(err.message)
+      settingsOpen.value = true
+    } else {
+      error.value = err.message
+    }
   } finally {
     busy.value = ''
   }
@@ -306,28 +401,61 @@ function resetFilters() {
   yearFrom.value = ''
   yearTo.value = ''
 }
+
+function recentYears() {
+  const currentYear = new Date().getFullYear()
+  yearFrom.value = String(currentYear - 4)
+  yearTo.value = String(currentYear)
+}
 </script>
 
 <template>
   <main :class="{ 'with-bar': searched && papers.length }">
     <header class="topbar">
       <div class="brand">Literature Crew<span>.</span></div>
-      <details class="settings" :open="!configured">
-        <summary class="chip" :class="{ off: !configured }">
-          <span class="dot" aria-hidden="true"></span>
-          <strong data-testid="configured-model">{{ model || 'Not configured' }}</strong>
-          <span class="muted">{{ configured ? 'ready' : 'setup needed' }}</span>
+      <span class="spacer"></span>
+      <details class="settings" :open="settingsOpen" @toggle="settingsOpen = $event.target.open">
+        <summary class="chip settings-trigger" aria-label="設定">
+          <span aria-hidden="true">⚙</span> 設定
         </summary>
         <div class="settings-body">
-          <p v-if="!configured" class="notice warning">
-            Set OPENAI_API_KEY and MODEL in backend/.env, then restart the backend. Paper search is available without them.
+          <h2>設定</h2>
+          <ThemePicker />
+          <label class="connection-label">AI 連線方式
+            <select v-model="connectionMode" data-testid="ai-connection-mode" :disabled="connectionBusy || !!activeReview"
+              @change="switchConnection">
+              <option value="codex_cli">ChatGPT 訂閱登入</option>
+              <option value="openai_api">OpenAI API</option>
+              <option value="claude_cli">Claude Code 訂閱</option>
+            </select>
+          </label>
+          <template v-if="connectionMode === 'openai_api'">
+            <form class="api-connection" @submit.prevent="connectAI">
+              <label>OpenAI API key
+                <input v-model="apiKey" type="password" data-testid="api-key" maxlength="1024" autocomplete="off"
+                  spellcheck="false" placeholder="輸入 API key" :disabled="connectionBusy || !!activeReview" @input="editingApiKey" />
+              </label>
+              <button type="submit" :disabled="connectionBusy || !!activeReview">{{ connectionBusy ? '驗證中…' : '驗證 API 連線' }}</button>
+            </form>
+            <p v-if="apiVerified" class="connection-success" role="status">API 連線已驗證</p>
+            <p v-else-if="hasServerKey" class="muted">已設定後端金鑰。可留空並按驗證，或輸入新的金鑰。</p>
+            <p class="muted">金鑰暫存於後端記憶體，最長 8 小時。服務重啟後需重新輸入。</p>
+          </template>
+          <ChatGPTLogin v-if="connectionMode === 'codex_cli' && aiBackend === 'codex_cli'" :key="connectionId" @connected="chatgptConnected = $event" />
+          <button v-if="connectionMode === 'claude_cli' || (connectionMode === 'codex_cli' && connectionError)" class="secondary" type="button"
+            :disabled="connectionBusy || !!activeReview" @click="connectAI">確認訂閱連線</button>
+          <p v-if="connectionBusy" class="muted" role="status">正在確認連線…</p>
+          <p v-if="connectionError" class="notice error" role="alert">{{ connectionError }}</p>
+          <ModelPicker v-model="selectedModel" :enabled="canLoadModels" :backend="aiBackend"
+            :connection-id="connectionId" @connection-error="modelConnectionError"
+            :default-model="model" :disabled="!!busy || !!activeReview || connectionBusy" />
+          <p v-if="configured" class="connection-status">
+          <strong data-testid="configured-model">{{ selectedModel || model || 'Not configured' }}</strong>
+          <span class="muted">{{ configured ? (aiBackend === 'openai_api' ? 'ready' : aiBackend === 'codex_cli' ? 'connected' : 'CLI available') : 'setup needed' }}</span>
           </p>
-          <p class="muted">Configuration is loaded from backend/.env. Restart the backend after editing it.</p>
-          <p class="muted">Search is free. Generating a review sends paper text to the model provider and uses API credits.
-            API keys stay on the backend.</p>
+          <p v-if="connectionMode === 'claude_cli' && !configured" class="muted">請先在執行服務的電腦或容器登入 Claude Code，再確認連線。</p>
         </div>
       </details>
-      <span class="spacer"></span>
       <button class="secondary" data-testid="history-toggle" :aria-expanded="historyExpanded"
         aria-controls="history-content" @click="toggleHistory">
         {{ historyExpanded ? 'Hide history' : 'History' }}
@@ -369,6 +497,7 @@ function resetFilters() {
                 <option v-for="n in 10" :key="n" :value="n">{{ n }}</option>
               </select>
             </label>
+            <button class="secondary" type="button" data-testid="recent-years" @click="recentYears">Last 5 calendar years</button>
             <button class="secondary" type="button" @click="resetFilters">Reset filters</button>
             <p class="muted filter-hint">Year uses arXiv submission dates or Semantic Scholar publication years.
               Subject classifications vary by source.</p>
@@ -383,6 +512,8 @@ function resetFilters() {
         <p v-if="reviewError" class="notice error" role="alert">{{ reviewError }}</p>
 
         <ReportView v-if="result" :result="result" />
+
+        <ReviewOptions v-if="searched && papers.length" v-model="reviewOptions" :disabled="!!busy || !!activeReview" />
 
         <section v-if="searched" class="results" :aria-busy="!!busy">
           <div class="section-heading">
@@ -443,7 +574,7 @@ function resetFilters() {
           <span class="icon" aria-hidden="true">{{ item.kind === 'review' ? '📄' : '🔍' }}</span>
           <span class="history-text">
             <strong>{{ item.topic }}</strong>
-            <span class="muted">{{ item.kind === 'review' ? 'Review' : 'Search' }} ·
+            <span class="muted">{{ item.kind === 'review' ? (item.output_mode === 'introduction' ? 'Introduction' : 'Review') : 'Search' }} ·
               {{ item.status === 'completed' ? (item.paper_count ? `${item.paper_count} papers` : 'no results') : item.status }} ·
               {{ new Date(item.created_at).toLocaleString() }}</span>
             <span v-if="openingHistory === item.id" class="muted">Opening…</span>
@@ -452,7 +583,7 @@ function resetFilters() {
         <button v-if="historyHasMore" class="secondary" :disabled="historyLoading" @click="loadHistory(true)">Load more</button>
       </aside>
     </div>
-    <footer>Literature Crew · arXiv + Semantic Scholar + CrewAI</footer>
+    <footer>Literature Crew · arXiv + Semantic Scholar · {{ aiLabel }}</footer>
   </main>
 
   <div v-if="searched && papers.length" class="selection-bar">
@@ -464,7 +595,7 @@ function resetFilters() {
       <span class="muted picked">{{ selectedPapers.map(shortCitation).join(' · ') }}</span>
       <span class="spacer"></span>
       <button class="secondary" type="button" :disabled="!!busy || !selected.length" @click="selected = []">Clear</button>
-      <button :disabled="!!busy || !!activeReview || !configured || !selected.length" @click="generate">{{ alreadyGenerated ? 'Regenerate review' : 'Generate review' }}</button>
+      <button :disabled="!!busy || !!activeReview || !configured || !selected.length" @click="generate">{{ generateLabel }}</button>
     </div>
   </div>
 </template>

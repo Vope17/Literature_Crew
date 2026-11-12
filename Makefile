@@ -4,7 +4,7 @@ SHELL := /bin/bash
 UV ?= uv
 PNPM ?= pnpm
 
-.PHONY: help env install start backend frontend build serve test
+.PHONY: help env install start backend frontend build serve test docker-up docker-test docker-down
 
 help:
 	@printf '%s\n' \
@@ -15,6 +15,20 @@ help:
 	  'make build     Build the frontend' \
 	  'make serve     Build Vue and serve the app on :8000' \
 	  'make test      Run backend and frontend tests'
+	@printf '%s\n' \
+	  'make docker-up    Build and run the app at localhost:8000' \
+	  'make docker-test  Run backend and frontend tests in Docker' \
+	  'make docker-down  Stop containers; retain saved data and CLI logins'
+
+docker-up:
+	docker compose up --build -d
+
+docker-test:
+	docker compose --profile test run --rm --build backend-test
+	docker compose --profile test run --rm --build frontend-test
+
+docker-down:
+	docker compose down
 
 env:
 	@umask 077; if [ ! -e backend/.env ]; then cp backend/.env.example backend/.env; fi

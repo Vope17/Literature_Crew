@@ -1,7 +1,120 @@
 # Literature Crew
 
 Minimal implementation of `CrewAI_文獻搜尋.pdf`: **Vue 3 + Vite** frontend,
-**FastAPI + CrewAI** backend, and **uv** for Python dependencies.
+**FastAPI + CrewAI** backend, and **uv** for Python dependencies. Reports follow
+the supplied `緒論規範.pdf`: evidence-linked thematic synthesis, alternative findings,
+candidate research gaps, and an optional introduction draft with your study details.
+
+## Run with Docker
+
+Docker Engine with Compose v2.24+ is sufficient; Python, uv, Node and the official
+AI CLIs are installed inside the image.
+
+```sh
+make env
+# Edit backend/.env to choose an AI backend (see below).
+docker compose up --build -d
+```
+
+Open **http://localhost:8000**. `docker compose logs -f app` shows server logs;
+`docker compose down` stops the app while preserving its volumes. The app runs as
+an unprivileged container user, and the published port binds only to localhost.
+The image excludes `.env`, local credentials, databases and PDFs from its build context.
+
+Nginx is the only published service: `localhost:8000 → nginx:80 → app:8000`.
+FastAPI is accessible only inside the Compose network. Nginx forwards the frontend,
+API polling and PDF downloads, and allows up to 210 seconds for searches that
+retry upstream providers. Its upstream DNS refreshes when the app is recreated.
+Configuration is packaged from `nginx/default.conf`; run `docker compose exec nginx nginx -t`
+to validate it. After editing, run `docker compose up --build -d nginx` to rebuild it.
+
+Run tests entirely in Docker:
+
+```sh
+make docker-test
+```
+
+The `literature-data` volume stores new history and PDFs. Existing host data under
+`backend/data/` stays on the host; it is not automatically imported into Docker.
+Separate `codex-login` and `claude-login` volumes retain official CLI sign-ins.
+Treat those volumes as account credentials. Avoid `docker compose down -v` if you
+want to retain history and logins.
+
+## Choose API billing or your own CLI subscription
+
+Open the **⚙ 設定** panel to choose appearance, AI connection and model. Choose
+**ChatGPT 訂閱登入** to authorize through OpenAI, or **OpenAI API** to enter a key
+and click **驗證 API 連線**. A model dropdown appears after connection succeeds.
+The browser's selected connection is used for its reports.
+
+Entered API keys are sent to the backend for validation and held in server memory
+for at most eight hours. A browser-scoped HttpOnly cookie identifies the connection.
+Restarting the service requires re-entering a key. Credentials are excluded from
+history and responses. Failed verification preserves the prior server connection;
+the form stays unverified until verification succeeds. Expired connection contexts
+require reconnecting before a new report can start.
+
+`backend/.env` supplies the initial backend and optional API key. Recreate the app
+after changing it with `docker compose up -d`.
+
+| `AI_BACKEND` | Authentication | Model setting |
+|---|---|---|
+| `openai_api` (default) | `OPENAI_API_KEY`; OpenAI API billing | `MODEL=openai/...` |
+| `codex_cli` | Your own ChatGPT login through the official Codex CLI | Optional `CLI_MODEL`; empty uses the CLI default |
+| `claude_cli` | Your own Claude subscription login through official Claude Code | Optional `CLI_MODEL`; empty uses the CLI default |
+
+For ChatGPT subscription usage, set `AI_BACKEND=codex_cli`, then sign in:
+
+Open the app's settings panel and click **Connect ChatGPT subscription**. Copy the
+one-time code, open the displayed official OpenAI sign-in link, enter the code and
+approve access. The app polls the official Codex app-server and shows **Connected
+to ChatGPT** when authorization completes. No callback port needs to be published
+through Docker or Nginx. Enable device code login in ChatGPT security settings or
+workspace permissions if OpenAI requires it. Pending login can be cancelled or
+restarted after expiry. This does not validate access to every model; generation
+still checks the selected model and your account limits.
+
+The terminal remains available as an alternative:
+
+```sh
+docker compose run --rm app codex login --device-auth
+docker compose run --rm app codex login status
+docker compose up -d
+```
+
+For Claude subscription usage, set `AI_BACKEND=claude_cli`, then sign in:
+
+```sh
+docker compose run --rm app claude auth login
+docker compose run --rm app claude auth status
+docker compose up -d
+```
+
+Complete the official browser flow yourself. For terminal login, if the container cannot open a
+browser, copy its displayed URL into your browser and follow the CLI's code-paste
+instructions. The application does not collect or parse tokens or browser cookies.
+Login in the container is separate from any host CLI login. Run these commands
+from your own terminal; they are interactive.
+
+CLI modes run the published binaries, verify subscription authentication before
+reading papers, send prompts through stdin, and disable generation tools. They
+ignore `MODEL` and the app's API keys. Set `CLI_MODEL` to a CLI-native model name,
+without an `openai/` prefix. `CLI_TIMEOUT_SECONDS` defaults to 600 per stage.
+The UI's “CLI available” means the binary is installed; authentication is checked
+when generation starts. Subscription access, supported models and usage limits
+remain subject to your account. The app does not fall back to API billing.
+
+This integration is intended for this local, single-user app. Each user signs in
+with their own account in the unchanged official CLI. It does not provide a
+shared Claude or ChatGPT login service. See official [Codex authentication](https://learn.chatgpt.com/docs/auth),
+[Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
+[Claude Code programmatic usage](https://code.claude.com/docs/en/headless),
+[Claude Code authentication](https://code.claude.com/docs/en/authentication), and
+[Claude Code credential-use requirements](https://code.claude.com/docs/en/legal-and-compliance).
+
+Without Docker, install and sign in to the selected CLI as the same OS user that
+runs the backend (`codex login` or `claude auth login`). The backend must have the
+CLI on its `PATH`.
 
 ## Run for development
 
@@ -52,21 +165,34 @@ MODEL=openai/gpt-4o-mini
 
 Restart the backend after editing this file, then refresh the browser. The `.env`
 file is ignored by Git. Existing process environment variables take precedence.
-The UI displays the configured model; requests cannot override the server's key
-or model. The frontend does not list available models. API keys are
-never sent to or entered in the frontend. Search works without an OpenAI key.
+After connection, the settings panel loads a model dropdown. OpenAI API models
+come from the API catalog; ChatGPT models come from Codex's authenticated catalog.
+Claude Code offers the official Sonnet, Opus and Haiku aliases after CLI login.
+Use **Refresh models** to reload the choices. Each report uses and saves its selected
+model; the server validates selections against the current catalog. Catalog entries
+may still be subject to account access and generation limits. Leaving the default
+selected uses the configured server/CLI model. Search works without an OpenAI key.
 
 1. Enter a topic, optionally select a subject area and year range, and search (no API key required).
-2. Select up to five papers and click **Generate review**. Progress appears while
+2. Select up to five papers. Choose **Literature review** or **Introduction draft**
+   and Traditional Chinese or English. Introduction drafts accept your working
+   title, motivation, research question, objectives, context, units, proposed method
+   and contribution; missing details are explicitly marked for you to supply.
+   Click **Generate review** or **Generate introduction**. Progress appears while
    the background job runs; you can continue searching.
-3. Read the comparison table and research-gap discussion; download Markdown or
-   source evidence JSON or saved PDFs.
+3. Read the thematic synthesis, comparison and evidence-bounded research gaps,
+   or the introduction draft. Expand **Evidence checks** to inspect citation IDs,
+   supplied page numbers and text coverage. These mechanical checks do not prove
+   that a claim is supported by its citation or that the prose meets every rule.
+   Download Markdown, source evidence JSON (including structured per-paper notes),
+   or saved PDFs.
 4. Click **Show history** to expand saved searches and reviews, then **Open result**
    to restore one. Reopening a saved review does not generate it again or use API credits.
 
 Search filters apply to both arXiv and the Semantic Scholar fallback. Leave either
 year blank for an open-ended range; **Reset filters** returns to all subjects and
-years. The results header records the filters used for the last search. Years use
+years. **Last 5 calendar years** sets the current year and previous four years;
+you can still select older theoretical or historical sources. The results header records the filters used for the last search. Years use
 arXiv submission dates or Semantic Scholar publication years. Subject taxonomies
 differ: biology maps to arXiv quantitative biology, and electrical engineering maps
 to arXiv eess versus Semantic Scholar's broader Engineering field.
@@ -99,8 +225,11 @@ authentication and is intended for local use.
 - `backend/search_filters.py`: validated subject/year filters and provider-specific mappings.
 - `backend/semantic_search.py`: independent Semantic Scholar fallback with its own pacing and cache.
 - `backend/model_catalog.py`: model discovery with the OpenAI SDK.
-- `backend/literature.py`: PDF extraction with PyMuPDF, then two sequential
-  CrewAI agents for analysis and writing.
+- `backend/literature.py`: PDF extraction with PyMuPDF, validated structured analysis,
+  then writing through two sequential CrewAI agents or two official CLI calls.
+- `backend/review_guidelines.py`: evidence schema, writing requirements, study options
+  and mechanical citation checks.
+- `backend/ai_backend.py`: server-side backend settings and official CLI adapters.
 
 Python dependencies, the uv lockfile, environment template, and tests also live
 in `backend/`. The Vue project and its dependencies live in `frontend/`.
@@ -120,7 +249,8 @@ uv export --directory backend --frozen --offline --no-cache --no-dev --no-emit-p
 
 `POST /api/review` returns **202 Accepted** and a job ID immediately. The frontend
 polls `/api/reviews/{id}` every two seconds, with a finite timeout on each request.
-Model requests have a 120-second timeout. Connection failures show a **Retry status
+API model requests have a 120-second timeout; CLI stages default to 600 seconds.
+Connection failures show a **Retry status
 check** button; the job keeps running on the backend. The current job ID is stored
 in the browser so refreshing reconnects to it. Completed results can always be
 opened from history.
@@ -128,7 +258,9 @@ opened from history.
 SQLite is created automatically at **`backend/data/history.sqlite3`**. To change
 the path, set `HISTORY_DB_PATH` in `backend/.env`; relative paths are resolved from
 `backend/`. History includes successful searches, selected papers, the configured
-model, review Markdown, and source evidence. PDFs downloaded for reviews are stored
+model, AI backend, study options, citation checks, review Markdown, and source evidence.
+Existing SQLite databases are migrated automatically without removing history.
+PDFs downloaded for reviews are stored
 in SQLite, reused on subsequent reviews, and available through **Saved PDFs** in
 the report. Failed downloads remain labelled as abstract-only evidence. API keys
 are never stored in history. The default data directory is ignored by Git; back
@@ -158,12 +290,17 @@ set an optional `SEMANTIC_SCHOLAR_API_KEY` in `backend/.env` and restart the bac
 to use dedicated Semantic Scholar credentials. Request a key through
 [Semantic Scholar](https://www.semanticscholar.org/product/api).
 
-PDF downloads are limited to 20 MB and extracted text to the first 30,000
-characters per paper. Failed downloads and scanned PDFs fall back to abstracts;
+PDF downloads are limited to 20 MB and extracted text to 30,000 characters per
+paper. Long papers use labelled excerpts from opening, ending and section-heading
+pages (methods, results, discussion, limitations), with representative pages added
+within the budget. Omitted text is not evidence, and some relevant passages can
+still be missed. PDFs with unextractable pages also have limited coverage.
+Failed downloads and scanned PDFs fall back to abstracts;
 the UI and report identify limited coverage. OCR, SCI-index verification,
 Zotero, and BibTeX export are outside this minimal version.
 arXiv includes preprints, and generated claims still need human review. Generating
-a review sends paper text to the model provider and uses API credits. Closing
+a review sends paper text to the model provider and uses API credits or your own
+CLI plan allowance according to the configured backend. Closing
 the tab does not cancel an already-running backend review.
 
 ## Test

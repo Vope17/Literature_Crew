@@ -45,6 +45,14 @@ class HistoryStore:
                     created_at TEXT NOT NULL
                 );
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(history)")}
+            for name, definition in {
+                "ai_backend": "TEXT NOT NULL DEFAULT 'openai_api'",
+                "options": "TEXT NOT NULL DEFAULT '{}'",
+                "checks": "TEXT NOT NULL DEFAULT '[]'",
+            }.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE history ADD COLUMN {name} {definition}")
 
     @contextmanager
     def connect(self):
@@ -56,18 +64,19 @@ class HistoryStore:
         finally:
             db.close()
 
-    def create(self, *, kind, topic, papers, model=None, filters=None, source=None, notice=None):
+    def create(self, *, kind, topic, papers, model=None, filters=None, source=None, notice=None,
+               ai_backend="openai_api", options=None):
         record_id, now = uuid4().hex, timestamp()
         status = "queued" if kind == "review" else "completed"
         progress = "Waiting to generate the review…" if kind == "review" else "Search saved."
         with self.connect() as db:
             db.execute("""
                 INSERT INTO history
-                (id, kind, topic, model, papers, filters, source, notice, status, progress, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, kind, topic, model, papers, filters, source, notice, status, progress, created_at, updated_at, ai_backend, options)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (record_id, kind, topic, model, json.dumps(papers),
                   json.dumps(filters) if filters is not None else None,
-                  source, notice, status, progress, now, now))
+                  source, notice, status, progress, now, now, ai_backend, json.dumps(options or {})))
         return record_id
 
     def get(self, record_id):
@@ -76,14 +85,15 @@ class HistoryStore:
         if row is None:
             return None
         record = dict(row)
-        for key in ("papers", "evidence", "filters"):
+        for key in ("papers", "evidence", "filters", "options", "checks"):
             record[key] = json.loads(record[key]) if record[key] is not None else None
         return record
 
     def list(self, limit=20, offset=0):
         with self.connect() as db:
             rows = db.execute("""
-                SELECT id, kind, topic, model, status, progress, error, created_at, updated_at,
+                SELECT id, kind, topic, model, ai_backend, status, progress, error, created_at, updated_at,
+                       json_extract(options, '$.mode') AS output_mode,
                        json_array_length(papers) AS paper_count
                 FROM history ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
             """, (limit + 1, offset)).fetchall()
@@ -96,13 +106,13 @@ class HistoryStore:
                 WHERE id = ? AND status IN ('queued', 'running')
             """, (message, timestamp(), record_id))
 
-    def complete(self, record_id, review, evidence):
+    def complete(self, record_id, review, evidence, *, checks=None):
         with self.connect() as db:
             db.execute("""
                 UPDATE history SET status = 'completed', progress = 'Review saved.',
-                    review = ?, evidence = ?, updated_at = ?
+                    review = ?, evidence = ?, checks = ?, updated_at = ?
                 WHERE id = ? AND status IN ('queued', 'running')
-            """, (review, json.dumps(evidence), timestamp(), record_id))
+            """, (review, json.dumps(evidence), json.dumps(checks or []), timestamp(), record_id))
 
     def fail(self, record_id, message):
         with self.connect() as db:
