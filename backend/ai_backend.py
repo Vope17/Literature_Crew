@@ -1,10 +1,12 @@
 """Server-side API configuration and official, locally authenticated CLI adapters."""
 
 import json
+import base64
 import os
 import shutil
 import signal
 import subprocess
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -130,7 +132,31 @@ def require_cli_login(backend: str) -> None:
             raise AIBackendError("Codex is using API key billing. Run codex login and sign in with ChatGPT for subscription usage.")
 
 
-def run_cli(backend: str, prompt: str, *, model: str = "", schema: dict | None = None, timeout: int = 600) -> str:
+def _codex_schema(schema: dict) -> dict:
+    """Codex passes schemas directly; unlike Responses.parse it does not make them strict."""
+    result = deepcopy(schema)
+
+    def normalize(node):
+        if not isinstance(node, dict):
+            return
+        node.pop("default", None)
+        if "properties" in node:
+            node["required"] = list(node["properties"])
+            node["additionalProperties"] = False
+        for key in ("properties", "$defs", "definitions"):
+            for child in node.get(key, {}).values():
+                normalize(child)
+        for key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+            for child in node.get(key, []):
+                normalize(child)
+        normalize(node.get("items"))
+
+    normalize(result)
+    return result
+
+
+def run_cli(backend: str, prompt: str, *, model: str = "", schema: dict | None = None, timeout: int = 600,
+            images: list[bytes] | None = None) -> str:
     """Run an unchanged official CLI; credentials stay entirely with that CLI."""
     executable = "codex" if backend == "codex_cli" else "claude"
     binary = shutil.which(executable)
@@ -150,10 +176,14 @@ def run_cli(backend: str, prompt: str, *, model: str = "", schema: dict | None =
                 command.extend(["--disable", feature])
             if schema is not None:
                 schema_file = Path(directory) / "schema.json"
-                schema_file.write_text(json.dumps(schema), encoding="utf-8")
+                schema_file.write_text(json.dumps(_codex_schema(schema)), encoding="utf-8")
                 command.extend(["--output-schema", str(schema_file)])
             if model:
                 command.extend(["--model", model])
+            for index, data in enumerate(images or []):
+                path = Path(directory) / f"page-{index + 1}.png"
+                path.write_bytes(data)
+                command.extend(["--image", str(path)])
             command.append("-")
             _run(command, cwd=directory, prompt=prompt, timeout=timeout)
             if not output.exists():
@@ -170,9 +200,24 @@ def run_cli(backend: str, prompt: str, *, model: str = "", schema: dict | None =
                 command.extend(["--model", model])
             if schema is not None:
                 command.extend(["--json-schema", json.dumps(schema)])
+            if images:
+                command[command.index("--output-format") + 1] = "stream-json"
+                command.extend(["--input-format", "stream-json", "--verbose"])
+                content = [{"type": "text", "text": prompt}]
+                content.extend({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                           "data": base64.b64encode(data).decode("ascii")}}
+                               for data in images)
+                prompt = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
             output = _run(command, cwd=directory, prompt=prompt, timeout=timeout)
             try:
-                payload = json.loads(output)
+                if images:
+                    events = [json.loads(line) for line in output.splitlines() if line.strip()]
+                    results = [event for event in events if isinstance(event, dict) and event.get("type") == "result"]
+                    if len(results) != 1:
+                        raise ValueError("Missing final result")
+                    payload = results[0]
+                else:
+                    payload = json.loads(output)
                 if not isinstance(payload, dict) or payload.get("is_error"):
                     raise ValueError("CLI error")
                 if schema is not None:

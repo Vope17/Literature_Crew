@@ -3,6 +3,7 @@
 import logging
 import os
 import asyncio
+from dataclasses import replace
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -19,7 +20,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, Authenti
 
 from literature import MAX_PAPERS, Paper, generate_review, search_papers
 from model_catalog import list_models
-from paper_search import SearchError, search_query
+from paper_search import SearchError
+from search_keywords import MAX_TOPIC_CHARS, extract_keywords
 from semantic_search import search_semantic_scholar
 from search_filters import AREAS, SearchFilters
 from storage import HistoryStore
@@ -57,8 +59,11 @@ app = FastAPI(title="Literature Crew", lifespan=lifespan)
 
 class SearchRequest(SearchFilters):
     model_config = ConfigDict(str_strip_whitespace=True)
-    topic: str = Field(min_length=1, max_length=500)
+    topic: str = Field(min_length=1, max_length=MAX_TOPIC_CHARS)
     limit: int = Field(default=5, ge=1, le=10)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    connection_id: str | None = Field(default=None, max_length=128)
+    filter_overrides: list[Literal["area", "years", "limit"]] | None = Field(default=None, max_length=3)
 
 
 class PaperInput(BaseModel):
@@ -88,7 +93,7 @@ class PaperInput(BaseModel):
 
 class ReviewRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    topic: str = Field(min_length=1, max_length=500)
+    topic: str = Field(min_length=1, max_length=MAX_TOPIC_CHARS)
     papers: list[PaperInput] = Field(min_length=1, max_length=MAX_PAPERS)
     options: ReviewOptions = Field(default_factory=ReviewOptions)
     model: str | None = Field(default=None, min_length=1, max_length=200)
@@ -140,23 +145,38 @@ def config(request: Request):
 
 
 @app.post("/api/search")
-def search(body: SearchRequest):
-    filters = SearchFilters(area=body.area, year_from=body.year_from, year_to=body.year_to)
+async def search(body: SearchRequest, request: Request):
+    check_connection(request, body.connection_id)
+    settings = effective_settings(request)
+    if body.model is not None:
+        catalog = await models(request)
+        if body.model not in {item["id"] for item in catalog["models"]}:
+            raise HTTPException(400, "Selected model is not in the current model list. Refresh models and select again.")
+        settings = replace(settings, model=body.model)
+    if error := settings.setup_error():
+        raise HTTPException(400, "Connect AI in settings before searching. " + error)
+    try:
+        keywords = await asyncio.to_thread(extract_keywords, body.topic, settings)
+    except AIBackendError as exc:
+        raise HTTPException(503, str(exc)) from None
+    return await asyncio.to_thread(search_with_keywords, body, keywords, settings)
+
+
+def search_with_keywords(body, keywords, settings):
+    filters, limit = keywords.resolve_filters(
+        SearchFilters(area=body.area, year_from=body.year_from, year_to=body.year_to),
+        body.limit, body.filter_overrides,
+    )
+    applied_filters = {**filters.model_dump(), "limit": limit}
     try:
         try:
-            papers = search_papers(body.topic, body.limit, filters=filters)
+            papers = search_papers(keywords.query, limit, filters=filters)
             source, notice = "arXiv", None
         except SearchError as primary_error:
             if primary_error.status_code not in (429, 502, 503, 504):
                 raise
-            # arXiv field operators have different meanings in the fallback API.
-            if search_query(body.topic) == body.topic:
-                raise SearchError(
-                    "arXiv is unavailable. Use plain keywords to enable the Semantic Scholar fallback; arXiv field queries cannot be transferred.",
-                    primary_error.status_code, primary_error.retry_after,
-                ) from None
             try:
-                papers = search_semantic_scholar(body.topic, body.limit, filters=filters)
+                papers = search_semantic_scholar(keywords.query, limit, filters=filters)
             except SearchError as fallback_error:
                 raise SearchError(
                     f"arXiv is unavailable. {fallback_error}",
@@ -169,10 +189,12 @@ def search(body: SearchRequest):
             )
             if not papers:
                 notice += " No arXiv-linked matches were found in the first results page; try different keywords."
-        payload = {"papers": [asdict(paper) for paper in papers], "source": source, "notice": notice}
+        payload = {"papers": [asdict(paper) for paper in papers], "source": source, "notice": notice,
+                   "keywords": keywords.keywords, "filters": applied_filters}
         payload["history_id"] = app.state.store.create(
-            kind="search", topic=body.topic, papers=payload["papers"], filters=filters.model_dump(),
+            kind="search", topic=body.topic, papers=payload["papers"], filters=applied_filters,
             source=source, notice=notice,
+            keywords=keywords.keywords, model=settings.model, ai_backend=settings.backend,
         )
         return payload
     except SearchError as exc:

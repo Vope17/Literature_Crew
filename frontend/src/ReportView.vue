@@ -1,4 +1,5 @@
 <script setup>
+import { t } from './i18n'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
@@ -84,52 +85,65 @@ function download(content, filename, type) {
 <template>
   <section ref="reportEl" class="report">
     <div v-if="toc.length > 1" v-show="reportVisible" ref="tocEl" class="toc-float">
-      <nav v-if="tocOpen" id="report-contents" class="toc" aria-label="Contents">
-        <strong>Contents</strong>
+      <nav v-if="tocOpen" id="report-contents" class="toc" :aria-label="t('Contents')">
+        <strong>{{ t('Contents') }}</strong>
         <a v-for="item in toc" :key="item.id" :href="`#${item.id}`" :class="item.level"
           @click="tocOpen = false">{{ item.text }}</a>
-        <a href="#sources" @click="tocOpen = false">Sources &amp; coverage</a>
+        <a href="#sources" @click="tocOpen = false">{{ t('Sources & coverage') }}</a>
       </nav>
       <button class="toc-toggle" type="button" :aria-expanded="tocOpen" aria-controls="report-contents"
-        @click="tocOpen = !tocOpen">{{ tocOpen ? '✕ Close' : '☰ Contents' }}</button>
+        @click="tocOpen = !tocOpen">{{ t(tocOpen ? '✕ Close' : '☰ Contents') }}</button>
     </div>
     <article class="panel report-body">
       <div class="report-head">
-        <h2>{{ result.options?.mode === 'introduction' ? `Introduction: ${result.topic}` : result.topic ? `Review: ${result.topic}` : 'Your literature review' }}</h2>
+        <h2>{{ t(result.options?.mode === 'introduction' ? `Introduction: ${result.topic}` : result.topic ? `Review: ${result.topic}` : 'Your literature review') }}</h2>
         <div class="downloads">
           <button class="secondary" @click="download(result.review, 'review.md', 'text/markdown')">Markdown ↓</button>
-          <button class="secondary" @click="download(JSON.stringify(evidence, null, 2), 'evidence.json', 'application/json')">Evidence JSON ↓</button>
+          <button class="secondary" @click="download(JSON.stringify(evidence, null, 2), 'evidence.json', 'application/json')">{{ t('Evidence JSON ↓') }}</button>
         </div>
       </div>
-      <p class="muted">Saved report<span v-if="result.ai_backend"> · {{ result.ai_backend }}</span><span v-if="result.model"> · {{ result.model }}</span>. Check claims against the original papers.</p>
+      <p class="muted">{{ t('Saved report') }}<span v-if="result.ai_backend"> · {{ result.ai_backend }}</span><span v-if="result.model"> · {{ result.model }}</span>{{ t('. Check claims against the original papers.') }}</p>
 
       <details v-if="result.checks?.length" class="report-checks">
-        <summary>Evidence checks · {{ result.checks.filter(check => check.status === 'warning').length }} need review</summary>
+        <summary>{{ t('Evidence checks') }} · {{ result.checks.filter(check => check.status === 'warning').length }} {{ t('need review') }}</summary>
         <ul>
           <li v-for="check in result.checks" :key="check.name" :class="check.status">
-            <strong>{{ check.name }}</strong>: {{ check.details }}
+            <strong>{{ t(check.name) }}</strong>: {{ t(check.details) }}
           </li>
         </ul>
-        <p class="muted">These checks verify citation IDs, supplied page numbers and text coverage. Confirm claim support and writing quality against the original papers.</p>
+        <p class="muted">{{ t('These checks verify citation IDs, supplied page numbers and recorded coverage. Confirm claim support, visual interpretation and writing quality against the original papers.') }}</p>
       </details>
 
       <div v-if="evidence.length" id="sources" class="sources saved-pdfs">
-        <h3>Sources &amp; coverage</h3>
+        <h3>{{ t('Sources & coverage') }}</h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>ID</th><th>Paper</th><th>Year</th><th>Coverage</th><th>PDF</th></tr></thead>
+            <thead><tr><th>ID</th><th>{{ t('Paper') }}</th><th>{{ t('Year') }}</th><th>{{ t('Coverage') }}</th><th>PDF</th></tr></thead>
             <tbody>
               <tr v-for="item in evidence" :id="`source-${item.id}`" :key="item.id">
                 <td>{{ item.id }}</td>
                 <td><a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
                   <template v-else>{{ item.title }}</template></td>
                 <td>{{ item.year }}</td>
-                <td><span class="cov" :class="item.coverage === 'full PDF' ? 'full' : 'warning'">{{ item.coverage }}</span></td>
+                <td><span class="cov" :class="['full PDF', 'multimodal PDF'].includes(item.coverage) ? 'full' : 'warning'">{{ t(item.coverage) }}</span>
+                  <div v-if="item.page_count" class="muted">{{ item.processed_pages }}/{{ item.page_count }} {{ t('pages processed') }} · {{ item.batch_count }} {{ t('batches') }}</div>
+                </td>
                 <td><a v-if="item.stored_pdf_url" :href="item.stored_pdf_url" download>↓</a><span v-else class="muted">—</span></td>
               </tr>
             </tbody>
           </table>
         </div>
+        <details v-for="item in evidence.filter(source => source.pages?.length)" :key="`pages-${item.id}`" class="report-checks">
+          <summary>{{ item.id }} · {{ t('Page reading details') }}<span v-if="item.limited_pages?.length"> · {{ item.limited_pages.length }} {{ t('pages need review') }}</span></summary>
+          <p class="muted">{{ t('Every page was submitted as text and a page image. Small labels, complex tables and formulas may still be misread. Full page notes are included in Evidence JSON.') }}</p>
+          <ul>
+            <li v-for="page in item.pages" :key="`${page.page}-${page.part}`" :class="page.status === 'readable' ? '' : 'warning'">
+              <strong>{{ t('p.') }} {{ page.page }}<template v-if="page.parts > 1"> · {{ t('part') }} {{ page.part }}/{{ page.parts }}</template>: {{ t(page.status) }}</strong>
+              <span v-if="page.limitations"> — {{ page.limitations }}</span>
+              <ul v-if="page.observations?.length"><li v-for="(note, index) in page.observations" :key="index">[{{ t(note.content_type) }} · {{ t(note.kind) }}] {{ note.text }}</li></ul>
+            </li>
+          </ul>
+        </details>
       </div>
 
       <div class="markdown" v-html="html"></div>

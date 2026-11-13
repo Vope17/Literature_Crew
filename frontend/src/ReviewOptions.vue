@@ -1,4 +1,5 @@
 <script setup>
+import { t } from './i18n'
 import { studyFields } from './reviewOptions'
 
 const props = defineProps({ modelValue: { type: Object, required: true }, disabled: Boolean })
@@ -9,17 +10,18 @@ function update(key, value) {
 </script>
 
 <template>
-  <section class="panel writing-options" aria-label="Report options">
-    <h2>Report options</h2>
+  <section class="panel writing-options" :aria-label="t('Report options')">
+    <h2>{{ t('Report options') }}</h2>
+    <p class="muted">{{ t('Reads each PDF as page text and images in batches. Choose a vision-capable model; longer papers require more time and AI usage.') }}</p>
     <div class="option-row">
-      <label>Output
+      <label>{{ t('Output') }}
         <select :value="modelValue.mode" :disabled="disabled" data-testid="output-mode"
           @change="update('mode', $event.target.value)">
-          <option value="review">Literature review</option>
-          <option value="introduction">Introduction draft</option>
+          <option value="review">{{ t('Literature review') }}</option>
+          <option value="introduction">{{ t('Introduction draft') }}</option>
         </select>
       </label>
-      <label>Language
+      <label>{{ t('Language') }}
         <select :value="modelValue.language" :disabled="disabled" data-testid="output-language"
           @change="update('language', $event.target.value)">
           <option value="zh-TW">繁體中文</option>
@@ -27,11 +29,11 @@ function update(key, value) {
         </select>
       </label>
     </div>
-    <p v-if="modelValue.mode === 'review'" class="muted">Synthesizes themes, agreements, opposing findings and candidate research gaps across your selected papers.</p>
+    <p v-if="modelValue.mode === 'review'" class="muted">{{ t('Synthesizes themes, agreements, opposing findings and candidate research gaps across your selected papers.') }}</p>
     <template v-else>
-      <p class="muted">Describe your own proposed study. Missing details will be marked “待補 / To supply” in the draft.</p>
+      <p class="muted">{{ t('Describe your own proposed study. Missing details will be marked “待補 / To supply” in the draft.') }}</p>
       <div class="study-fields">
-        <label v-for="[key, label] in studyFields" :key="key">{{ label }}
+        <label v-for="[key, label] in studyFields" :key="key">{{ t(label) }}
           <textarea :value="modelValue[key]" :data-testid="`study-${key}`" :disabled="disabled"
             :maxlength="key === 'title' ? 2000 : 3000" rows="2"
             @input="update(key, $event.target.value)"></textarea>

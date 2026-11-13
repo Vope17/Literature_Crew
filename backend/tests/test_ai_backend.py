@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 import subprocess
 from pathlib import Path
@@ -80,6 +81,68 @@ def test_claude_disables_tools_and_reads_structured_result(monkeypatch):
     assert command[command.index("--tools") + 1] == ""
     assert "--no-session-persistence" in command and "--strict-mcp-config" in command
     assert "--bare" not in command  # Bare mode does not use subscription login.
+
+
+def test_codex_search_schema_requires_nullable_filters_without_mutating_input(monkeypatch):
+    from search_keywords import SearchKeywords
+
+    schema = SearchKeywords.model_json_schema()
+    original = json.dumps(schema)
+
+    def run(command, **kwargs):
+        sent = json.loads(Path(command[command.index("--output-schema") + 1]).read_text())
+        assert set(sent["required"]) == set(sent["properties"])
+        assert sent["additionalProperties"] is False
+        assert {"type": "null"} in sent["properties"]["area"]["anyOf"]
+        assert "default" not in sent["properties"]["area"]
+        years = sent["$defs"]["SearchYears"]
+        assert set(years["required"]) == set(years["properties"])
+        Path(command[command.index("--output-last-message") + 1]).write_text(
+            '{"keywords":["Linux"],"area":null,"years":null,"limit":null}')
+        return ""
+
+    monkeypatch.setattr(ai_backend, "_run", run)
+    result = run_cli("codex_cli", "Linux", schema=schema)
+    assert SearchKeywords.model_validate_json(result).keywords == ["Linux"]
+    assert json.dumps(schema) == original
+
+
+def test_codex_attaches_images_and_cleans_temporary_files(monkeypatch):
+    files = []
+    def run(command, **kwargs):
+        for index, arg in enumerate(command):
+            if arg == "--image":
+                files.append(Path(command[index + 1]))
+        assert [path.read_bytes() for path in files] == [b"image-one", b"image-two"]
+        assert kwargs["prompt"] == "Pages 10 and 11"
+        Path(command[command.index("--output-last-message") + 1]).write_text('{"pages": []}')
+        return ""
+    monkeypatch.setattr(ai_backend, "_run", run)
+    run_cli("codex_cli", "Pages 10 and 11", images=[b"image-one", b"image-two"])
+    assert all(not path.exists() for path in files)
+
+
+def test_claude_streams_images_and_uses_only_final_structured_result(monkeypatch):
+    def run(command, **kwargs):
+        assert command[command.index("--input-format") + 1] == "stream-json"
+        assert command[command.index("--output-format") + 1] == "stream-json"
+        assert "--verbose" in command and command[command.index("--tools") + 1] == ""
+        content = json.loads(kwargs["prompt"])["message"]["content"]
+        assert content[0] == {"type": "text", "text": "Pages 10 and 11"}
+        assert [base64.b64decode(item["source"]["data"]) for item in content[1:]] == [b"one", b"two"]
+        return '\n'.join([json.dumps({"type": "assistant", "message": "Not the final result"}),
+                          json.dumps({"type": "result", "is_error": False, "structured_output": {"pages": []}})])
+    monkeypatch.setattr(ai_backend, "_run", run)
+    result = run_cli("claude_cli", "Pages 10 and 11", schema={"type": "object"}, images=[b"one", b"two"])
+    assert json.loads(result) == {"pages": []}
+
+
+@pytest.mark.parametrize("output", ['{"type":"assistant"}', '{"type":"result","is_error":true,"result":"secret"}'])
+def test_claude_missing_or_error_stream_result_is_not_success(monkeypatch, output):
+    monkeypatch.setattr(ai_backend, "_run", lambda *a, **kw: output)
+    with pytest.raises(AIBackendError) as error:
+        run_cli("claude_cli", "Read page", images=[b"image"])
+    assert "secret" not in str(error.value)
 
 
 @pytest.mark.parametrize("output", ['{"is_error": true, "result": "private-token"}', "not JSON", "[]"])

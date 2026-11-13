@@ -23,7 +23,7 @@ The image excludes `.env`, local credentials, databases and PDFs from its build 
 
 Nginx is the only published service: `localhost:8000 → nginx:80 → app:8000`.
 FastAPI is accessible only inside the Compose network. Nginx forwards the frontend,
-API polling and PDF downloads, and allows up to 210 seconds for searches that
+API polling and PDF downloads, and allows up to 300 seconds for AI keyword extraction and searches that
 retry upstream providers. Its upstream DNS refreshes when the app is recreated.
 Configuration is packaged from `nginx/default.conf`; run `docker compose exec nginx nginx -t`
 to validate it. After editing, run `docker compose up --build -d nginx` to rebuild it.
@@ -97,7 +97,7 @@ Login in the container is separate from any host CLI login. Run these commands
 from your own terminal; they are interactive.
 
 CLI modes run the published binaries, verify subscription authentication before
-reading papers, send prompts through stdin, and disable generation tools. They
+reading papers, send prompts through stdin, attach page images for document reading, and disable generation tools. They
 ignore `MODEL` and the app's API keys. Set `CLI_MODEL` to a CLI-native model name,
 without an `openai/` prefix. `CLI_TIMEOUT_SECONDS` defaults to 600 per stage.
 The UI's “CLI available” means the binary is installed; authentication is checked
@@ -171,9 +171,21 @@ Claude Code offers the official Sonnet, Opus and Haiku aliases after CLI login.
 Use **Refresh models** to reload the choices. Each report uses and saves its selected
 model; the server validates selections against the current catalog. Catalog entries
 may still be subject to account access and generation limits. Leaving the default
-selected uses the configured server/CLI model. Search works without an OpenAI key.
+selected uses the configured server/CLI model. Searching now requires a working AI connection
+(API or CLI subscription) because it extracts keywords before querying paper providers.
 
-1. Enter a topic, optionally select a subject area and year range, and search (no API key required).
+Settings includes an **Interface language** switch for English and Traditional Chinese.
+The choice is saved in this browser and is independent of the report's output language.
+
+1. Connect AI in settings, then enter a topic or research description (up to 10,000 characters),
+   optionally select a subject area and year range, and search. The selected AI extracts
+   1–4 short English keyword phrases (at most ten words total); the paper providers search
+   these terms rather than the original description. It also infers subject area, year range
+   and an explicitly requested result count (1–10). The results show the extracted keywords
+   and actual filters, and update the filter controls.
+   Each search uses your API credits or CLI allowance, even when provider results are cached.
+   Failed extraction returns an error rather than silently searching the original text.
+   The original description remains the report topic; history saves it alongside the keywords.
 2. Select up to five papers. Choose **Literature review** or **Introduction draft**
    and Traditional Chinese or English. Introduction drafts accept your working
    title, motivation, research question, objectives, context, units, proposed method
@@ -182,7 +194,7 @@ selected uses the configured server/CLI model. Search works without an OpenAI ke
    the background job runs; you can continue searching.
 3. Read the thematic synthesis, comparison and evidence-bounded research gaps,
    or the introduction draft. Expand **Evidence checks** to inspect citation IDs,
-   supplied page numbers and text coverage. These mechanical checks do not prove
+   supplied page numbers and recorded evidence coverage. These mechanical checks do not prove
    that a claim is supported by its citation or that the prose meets every rule.
    Download Markdown, source evidence JSON (including structured per-paper notes),
    or saved PDFs.
@@ -190,12 +202,20 @@ selected uses the configured server/CLI model. Search works without an OpenAI ke
    to restore one. Reopening a saved review does not generate it again or use API credits.
 
 Search filters apply to both arXiv and the Semantic Scholar fallback. Leave either
-year blank for an open-ended range; **Reset filters** returns to all subjects and
-years. **Last 5 calendar years** sets the current year and previous four years;
+year blank for an open-ended range. Manually changed fields take priority over AI inference
+until **Reset filters**, which clears the overrides, subject and years, and resets the result
+count to 5. Subsequent searches infer unpinned fields afresh, without retaining old AI filters.
+**Last 5 calendar years** sets the current year and previous four years;
 you can still select older theoretical or historical sources. The results header records the filters used for the last search. Years use
 arXiv submission dates or Semantic Scholar publication years. Subject taxonomies
 differ: biology maps to arXiv quantitative biology, and electrical engineering maps
 to arXiv eess versus Semantic Scholar's broader Engineering field.
+
+For example, `我想找linux網路相關的推薦一下，2025-2026的` asks the AI for English
+keywords such as `Linux` and `networking`, subject `computer_science`, and years
+2025–2026. This uses validated structured AI output: the backend validates the proposed
+parameters and calls the search providers. It does not require an autonomous tool-use loop.
+History stores the effective filters, including result count.
 
 ## Run as one server
 
@@ -221,12 +241,15 @@ authentication and is intended for local use.
 - `backend/review_jobs.py`: a separate worker for CrewAI runs, with persisted
   queued/running/completed/failed status and progress.
 - `backend/storage.py`: SQLite search/review history and downloaded PDF blobs.
+- `backend/search_keywords.py`: AI keyword extraction through the selected OpenAI API or official CLI, with validated structured output.
 - `backend/paper_search.py`: arXiv queries, Atom parsing, shared request pacing, and caching.
 - `backend/search_filters.py`: validated subject/year filters and provider-specific mappings.
 - `backend/semantic_search.py`: independent Semantic Scholar fallback with its own pacing and cache.
 - `backend/model_catalog.py`: model discovery with the OpenAI SDK.
-- `backend/literature.py`: PDF extraction with PyMuPDF, validated structured analysis,
-  then writing through two sequential CrewAI agents or two official CLI calls.
+- `backend/pdf_reading.py`: bounded PDF download, full-page rendering, batched visual reading and hierarchical evidence reduction.
+- `backend/ai_reading.py`: structured text/image calls through the selected API or CLI.
+- `backend/literature.py`: collect per-paper evidence digests, then synthesize and write
+  through two sequential CrewAI agents or two official CLI calls.
 - `backend/review_guidelines.py`: evidence schema, writing requirements, study options
   and mechanical citation checks.
 - `backend/ai_backend.py`: server-side backend settings and official CLI adapters.
@@ -277,10 +300,12 @@ are retried up to twice with finite connect/read timeouts. Each provider honors
 `Retry-After`, or uses a 60-second cooldown when it is omitted. If fallback cannot
 provide results either, the UI shows the error and a countdown when available.
 Cached results remain available during cooldowns. arXiv can still rate-limit a shared public IP; the app cannot remove an
-upstream limit. When arXiv is rate-limited or unavailable, plain keyword searches
+upstream limit. When arXiv is rate-limited or unavailable, extracted keyword searches
 automatically fall back to Semantic Scholar's bulk-search API. The UI labels the
 source and returns arXiv-linked papers from the first batch (up to 1,000 records),
-ordered by citation count. arXiv-specific field queries are not silently translated.
+ordered by citation count. The search box accepts natural-language research descriptions; it no longer passes through
+arXiv field operators. AI extracts plain terms, which arXiv combines with AND.
+This is AI-assisted keyword retrieval, not embedding-based similarity search.
 PDFs still come from arXiv; blocked PDF downloads use the returned abstracts.
 Invalid queries, timeouts, and connectivity failures are reported
 separately rather than hidden behind one generic error.
@@ -290,16 +315,41 @@ set an optional `SEMANTIC_SCHOLAR_API_KEY` in `backend/.env` and restart the bac
 to use dedicated Semantic Scholar credentials. Request a key through
 [Semantic Scholar](https://www.semanticscholar.org/product/api).
 
-PDF downloads are limited to 20 MB and extracted text to 30,000 characters per
-paper. Long papers use labelled excerpts from opening, ending and section-heading
-pages (methods, results, discussion, limitations), with representative pages added
-within the budget. Omitted text is not evidence, and some relevant passages can
-still be missed. PDFs with unextractable pages also have limited coverage.
-Failed downloads and scanned PDFs fall back to abstracts;
-the UI and report identify limited coverage. OCR, SCI-index verification,
+PDF downloads remain limited to 20 MB. Each PDF page is now rendered to an RGB PNG
+(longest edge at most 2,000 pixels, reduced further if a PNG exceeds 4 MB) and submitted with its extracted text to the selected
+vision-capable model. OpenAI uses Responses image inputs; Codex uses image attachments;
+Claude Code uses image content blocks through stream-JSON input. Subscription modes
+retain their CLI authentication and do not fall back to API billing. A model accepting
+text-only requests may reject image or structured-output requests; choose a compatible model.
+
+`PDF_BATCH_PAGES` defaults to 4 page entries per call (1–8). Text is bounded to 24,000
+characters and 12 MB of PNG data per batch. A dense page is split into 12,000-character text parts with the
+same page image; all parts are processed rather than silently truncated. Original PDF
+page numbers are preserved across batches. `PDF_MAX_PAGES` defaults to 200 (1–1,000);
+exceeding it stops generation explicitly, rather than sampling pages. Both settings
+can be changed in `backend/.env` followed by recreating the container.
+
+Each page record includes readability, text/figure/table/equation observations, and
+limitations. Scanned pages are sent as images even when text extraction returns nothing.
+Large sets of notes are condensed in multiple bounded stages before cross-paper synthesis;
+the full per-page text and observations remain in Evidence JSON. Digests can omit details,
+and passing page/citation checks does not establish semantic support for a claim.
+The report shows page counts, batches and expandable page reading details. All-pages
+coverage means all pages were submitted and accounted for, not that all visual details
+were recognized accurately. Small labels, complex tables and formulas still need review.
+
+Only download/opening failures fall back to labelled abstracts. A failed model call,
+missing page result or invalid citation stops the job. Page images are transient and
+are not saved in history; the original PDF remains cached. Each batch and reduction
+uses AI allowance, so long documents take longer and cost more. API reading calls time
+out after 120 seconds each; CLI calls use `CLI_TIMEOUT_SECONDS`. There is no automatic
+resume of a partially read document after failure. The Compose shutdown grace period
+is 35 minutes; a longer active job may be interrupted during container recreation.
+
+Standalone OCR, embeddings/RAG, SCI-index verification,
 Zotero, and BibTeX export are outside this minimal version.
 arXiv includes preprints, and generated claims still need human review. Generating
-a review sends paper text to the model provider and uses API credits or your own
+a review sends paper text and rendered page images to the model provider and uses API credits or your own
 CLI plan allowance according to the configured backend. Closing
 the tab does not cancel an already-running backend review.
 

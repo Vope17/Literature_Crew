@@ -1,4 +1,5 @@
 <script setup>
+import { t } from './i18n'
 import { onBeforeUnmount, ref, watch } from 'vue'
 
 const props = defineProps({
@@ -57,16 +58,16 @@ onBeforeUnmount(() => { ++sequence; controller?.abort() })
 
 <template>
   <div v-if="enabled" class="model-picker">
-    <label>Model
+    <label>{{ t('Model') }}
       <select :value="modelValue" data-testid="model-select" :disabled="loading || disabled"
         @change="emit('update:modelValue', $event.target.value)">
-        <option value="">{{ defaultModel ? `Default (${defaultModel})` : 'Select a model' }}</option>
+        <option value="">{{ t(defaultModel ? `Default (${defaultModel})` : 'Select a model') }}</option>
         <option v-for="item in models" :key="item.id" :value="item.id">{{ item.name }}</option>
       </select>
     </label>
-    <button class="link" type="button" :disabled="loading || disabled" @click="load">{{ loading ? 'Loading models…' : 'Refresh models' }}</button>
-    <p v-if="error" class="notice error" role="alert">{{ error }}</p>
-    <p v-else-if="!loading && !models.length" class="muted">No selectable models returned.</p>
-    <p v-if="notice" class="muted">{{ notice }}</p>
+    <button class="link" type="button" :disabled="loading || disabled" @click="load">{{ t(loading ? 'Loading models…' : 'Refresh models') }}</button>
+    <p v-if="error" class="notice error" role="alert">{{ t(error) }}</p>
+    <p v-else-if="!loading && !models.length" class="muted">{{ t('No selectable models returned.') }}</p>
+    <p v-if="notice" class="muted">{{ t(notice) }}</p>
   </div>
 </template>

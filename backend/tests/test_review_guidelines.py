@@ -91,3 +91,13 @@ def test_complex_multi_source_page_syntax_cannot_bypass_page_checks():
     ])
     assert checks[0]["status"] == "warning"
     assert "Unsupported citation format" in checks[0]["details"]
+
+
+def test_multimodal_citations_use_digest_pages_and_keep_coverage_honest(analysis_notes):
+    evidence = [{"id": "P1", "coverage": "limited multimodal PDF", "citation_pages": [1],
+                 "text": "A visual finding with a citation", "processed_pages": 2, "page_count": 2}]
+    validate_analysis(analysis_notes, evidence)
+    checks = check_review("A [P1, p. 1].", evidence)
+    assert checks[0]["status"] == "pass" and checks[2]["status"] == "warning"
+    checks = check_review("A [P1, p. 2].", evidence)
+    assert checks[0]["status"] == "warning"

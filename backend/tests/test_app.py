@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import app
 from literature import Paper
 from paper_search import SearchError
+from search_keywords import SearchKeywords
 
 @pytest.fixture(autouse=True)
 def isolated_history(monkeypatch, tmp_path):
@@ -15,6 +16,8 @@ def isolated_history(monkeypatch, tmp_path):
     monkeypatch.setenv("HISTORY_DB_PATH", str(tmp_path / "history.sqlite3"))
     monkeypatch.setenv("MODEL", "openai/example")
     monkeypatch.setenv("AI_BACKEND", "openai_api")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(app, "extract_keywords", lambda topic, settings: SearchKeywords(keywords=["graphs"]))
     with TestClient(app.app) as client:
         yield
 
@@ -81,6 +84,90 @@ def test_missing_key(monkeypatch, paper):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     response = client.post("/api/review", json={"topic": "graphs", "papers": [asdict(paper)]})
     assert response.status_code == 400
+
+
+def test_search_requires_ai_connection(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(app, "search_papers", lambda *a, **kw: pytest.fail("No search before AI setup"))
+    assert client.post("/api/search", json={"topic": "graphs"}).status_code == 400
+
+
+def test_long_description_preserved_with_keywords_and_browser_model(monkeypatch, paper):
+    monkeypatch.setattr(app, "list_models", lambda key: [{"id": "openai/chosen", "name": "chosen"}])
+    connection = client.post("/api/ai/connection", json={"backend": "openai_api", "api_key": "browser-key"},
+                             headers={"origin": "http://testserver"}).json()
+    topic = "我想研究機器學習在教育中的應用。" * 100
+
+    def extract(description, settings):
+        assert description == topic
+        assert settings.api_key == "browser-key" and settings.model == "openai/chosen"
+        return SearchKeywords(keywords=["machine learning", "education"])
+
+    def search(query, limit, **kwargs):
+        assert query == "machine learning education"
+        return [paper]
+
+    monkeypatch.setattr(app, "extract_keywords", extract)
+    monkeypatch.setattr(app, "search_papers", search)
+    response = client.post("/api/search", json={"topic": topic, "model": "openai/chosen",
+                                               "connection_id": connection["connection_id"]})
+    assert response.status_code == 200
+    saved = client.get('/api/history/' + response.json()["history_id"]).json()
+    assert saved["topic"] == topic
+    assert saved["keywords"] == ["machine learning", "education"]
+    assert saved["model"] == "openai/chosen"
+    assert "browser-key" not in str(saved)
+    monkeypatch.setattr(app, "generate_review", lambda *a, **kw: ("Review", []))
+    review = client.post("/api/review", json={"topic": topic, "papers": [asdict(paper)]})
+    assert review.status_code == 202
+    assert wait_for_review(review.json()["id"])["topic"] == topic
+
+
+def test_search_rejects_expired_connection_and_invalid_model_before_ai(monkeypatch):
+    monkeypatch.setattr(app, "extract_keywords", lambda *a: pytest.fail("Must reject before AI usage"))
+    assert client.post("/api/search", json={"topic": "graphs", "connection_id": "expired"}).status_code == 409
+    monkeypatch.setattr(app, "list_models", lambda key: [{"id": "openai/allowed"}])
+    assert client.post("/api/search", json={"topic": "graphs", "model": "openai/unknown"}).status_code == 400
+    assert client.post("/api/search", json={"topic": "a" * 10001}).status_code == 422
+
+
+def test_keyword_failure_stops_before_paper_search(monkeypatch):
+    def fail(*args):
+        raise app.AIBackendError("AI keyword extraction failed.")
+    monkeypatch.setattr(app, "extract_keywords", fail)
+    monkeypatch.setattr(app, "search_papers", lambda *a, **kw: pytest.fail("Do not search raw text"))
+    assert client.post("/api/search", json={"topic": "研究描述"}).status_code == 503
+
+
+def test_natural_language_filters_apply_to_fallback_response_and_history(monkeypatch, paper):
+    monkeypatch.setattr(app, "extract_keywords", lambda *args: SearchKeywords(
+        keywords=["Linux", "networking"], area="computer_science", years={"year_from": 2025, "year_to": 2026}, limit=7))
+    calls = []
+    def primary(query, limit, *, filters):
+        calls.append((query, limit, filters.model_dump()))
+        raise SearchError("Unavailable", 503)
+    def fallback(query, limit, *, filters):
+        calls.append((query, limit, filters.model_dump()))
+        return [paper]
+    monkeypatch.setattr(app, "search_papers", primary)
+    monkeypatch.setattr(app, "search_semantic_scholar", fallback)
+    topic = "我想找linux網路相關的推薦一下，2025-2026的，給我7篇"
+    response = client.post('/api/search', json={"topic": topic, "filter_overrides": []})
+    assert response.status_code == 200
+    expected = {"area": "computer_science", "year_from": 2025, "year_to": 2026}
+    assert calls == [("Linux networking", 7, expected)] * 2
+    assert response.json()["filters"] == {**expected, "limit": 7}
+    saved = client.get('/api/history/' + response.json()["history_id"]).json()
+    assert saved["filters"] == response.json()["filters"] and saved["topic"] == topic
+
+
+def test_search_respects_explicit_manual_override_of_inferred_dates(monkeypatch):
+    monkeypatch.setattr(app, "extract_keywords", lambda *args: SearchKeywords(
+        keywords=["Linux"], area="computer_science", years={"year_from": 2025, "year_to": 2026}))
+    monkeypatch.setattr(app, "search_papers", lambda *a, **kw: [])
+    response = client.post('/api/search', json={"topic": "Linux 2025-2026", "year_from": 2020,
+        "year_to": 2022, "filter_overrides": ["years"]})
+    assert response.json()["filters"] == {"area": "computer_science", "year_from": 2020, "year_to": 2022, "limit": 5}
 
 
 @pytest.mark.parametrize("payload", [{"topic": " "}, {"topic": "graphs", "limit": 11}])
@@ -154,18 +241,20 @@ def test_bad_query_does_not_call_fallback(monkeypatch):
     assert client.post("/api/search", json={"topic": "bad query"}).status_code == 400
 
 
-def test_advanced_query_does_not_silently_change_meaning(monkeypatch):
+def test_ai_keywords_are_used_by_both_search_providers(monkeypatch):
     def primary(*args, **kwargs):
+        assert args[0] == "graphs"
         raise SearchError("arXiv unavailable", 429, 60)
 
     def fallback(*args, **kwargs):
-        pytest.fail("arXiv field syntax cannot be sent to Semantic Scholar")
+        assert args[0] == "graphs"
+        return []
 
     monkeypatch.setattr(app, "search_papers", primary)
     monkeypatch.setattr(app, "search_semantic_scholar", fallback)
-    response = client.post("/api/search", json={"topic": "ti:graphs AND cat:cs.LG"})
-    assert response.status_code == 429
-    assert "plain keywords" in response.json()["detail"]
+    response = client.post("/api/search", json={"topic": "請幫我找圖論的相關文獻"})
+    assert response.status_code == 200
+    assert response.json()["keywords"] == ["graphs"]
 
 
 def test_models_uses_server_key(monkeypatch):

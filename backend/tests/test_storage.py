@@ -65,6 +65,7 @@ def test_existing_database_is_migrated_without_losing_saved_reports(tmp_path):
     old = store.get("old")
     assert old["review"] == "Original report"
     assert old["options"] == {} and old["checks"] == [] and old["ai_backend"] == "openai_api"
+    assert old["keywords"] == []
     new_id = store.create(kind="review", topic="new", papers=[], ai_backend="claude_cli",
                           options={"mode": "introduction", "units": "layouts"})
     store.complete(new_id, "New draft", [], checks=[{"name": "Coverage", "status": "warning"}])

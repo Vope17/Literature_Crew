@@ -90,7 +90,7 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 
 /* Search */
 .search-row { display: flex; gap: 10px; }
-.search-row input { margin-top: 0; }
+.search-row textarea { margin-top: 0; resize: vertical; min-width: 0; }
 .chips-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
 .fchip { display: inline-flex; gap: 4px; align-items: center; background: var(--accent-soft); border-radius: 999px; padding: 2px 4px 2px 10px; font-size: 13px; }
 .fchip button { background: none; color: var(--muted); padding: 0 6px; font-size: 12px; }

@@ -1,4 +1,5 @@
 <script setup>
+import { t } from './i18n'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 const emit = defineEmits(['connected'])
@@ -70,28 +71,28 @@ onBeforeUnmount(() => { alive = false; clearTimeout(timer); controller?.abort() 
 </script>
 
 <template>
-  <section class="chatgpt-login" aria-label="ChatGPT subscription connection" aria-live="polite">
-    <p v-if="state.status === 'checking'" class="muted">Checking ChatGPT connection…</p>
+  <section class="chatgpt-login" :aria-label="t('ChatGPT subscription connection')" aria-live="polite">
+    <p v-if="state.status === 'checking'" class="muted">{{ t('Checking ChatGPT connection…') }}</p>
     <p v-else-if="state.status === 'connected'" data-testid="chatgpt-connected">
-      Connected to ChatGPT<span v-if="state.plan"> · {{ state.plan }}</span>
+      {{ t('Connected to ChatGPT') }}<span v-if="state.plan"> · {{ state.plan }}</span>
     </p>
     <template v-else-if="state.status === 'pending'">
-      <p>Enter this one-time code on the official OpenAI page:</p>
+      <p>{{ t('Enter this one-time code on the official OpenAI page:') }}</p>
       <p class="device-code"><code data-testid="device-code">{{ state.user_code }}</code>
-        <button class="secondary" type="button" @click="copyCode">{{ copied ? 'Copied' : 'Copy code' }}</button>
+        <button class="secondary" type="button" @click="copyCode">{{ t(copied ? 'Copied' : 'Copy code') }}</button>
       </p>
-      <a class="auth-link" :href="state.verification_url" target="_blank" rel="noopener noreferrer">Open OpenAI sign-in ↗</a>
-      <p class="muted">Waiting for authorization. Sign in only on the official page; return here after approving.</p>
-      <button class="secondary" type="button" :disabled="busy" @click="change('cancel')">Cancel sign-in</button>
+      <a class="auth-link" :href="state.verification_url" target="_blank" rel="noopener noreferrer">{{ t('Open OpenAI sign-in ↗') }}</a>
+      <p class="muted">{{ t('Waiting for authorization. Sign in only on the official page; return here after approving.') }}</p>
+      <button class="secondary" type="button" :disabled="busy" @click="change('cancel')">{{ t('Cancel sign-in') }}</button>
     </template>
     <template v-else-if="state.status !== 'checking'">
-      <p v-if="state.message" class="notice warning">{{ state.message }}</p>
+      <p v-if="state.message" class="notice warning">{{ t(state.message) }}</p>
       <button type="button" :disabled="busy" data-testid="chatgpt-connect" @click="change('start')">
-        {{ busy ? 'Connecting…' : 'Connect ChatGPT subscription' }}
+        {{ t(busy ? 'Connecting…' : 'Connect ChatGPT subscription') }}
       </button>
-      <p class="muted">OpenAI may require device code login to be enabled in your ChatGPT security settings or workspace permissions.</p>
+      <p class="muted">{{ t('OpenAI may require device code login to be enabled in your ChatGPT security settings or workspace permissions.') }}</p>
     </template>
-    <p v-if="error" role="alert" class="notice error">{{ error }}</p>
-    <button v-if="error || state.status === 'connected'" class="link" type="button" :disabled="busy" @click="refresh">Retry status check</button>
+    <p v-if="error" role="alert" class="notice error">{{ t(error) }}</p>
+    <button v-if="error || state.status === 'connected'" class="link" type="button" :disabled="busy" @click="refresh">{{ t('Retry status check') }}</button>
   </section>
 </template>

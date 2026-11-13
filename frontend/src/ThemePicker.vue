@@ -1,4 +1,5 @@
 <script setup>
+import { t } from './i18n'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 const preference = ref('system')
@@ -38,11 +39,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <label class="theme-picker">外觀
-    <select v-model="preference" aria-label="外觀模式" @change="change">
-      <option value="system">跟隨系統</option>
-      <option value="light">淺色</option>
-      <option value="dark">深色</option>
+  <label class="theme-picker">{{ t('Appearance') }}
+    <select v-model="preference" :aria-label="t('Appearance mode')" @change="change">
+      <option value="system">{{ t('System') }}</option>
+      <option value="light">{{ t('Light') }}</option>
+      <option value="dark">{{ t('Dark') }}</option>
     </select>
   </label>
 </template>

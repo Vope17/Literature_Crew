@@ -1,4 +1,5 @@
 <script setup>
+import { t } from './i18n'
 import { computed } from 'vue'
 
 const props = defineProps({
@@ -17,8 +18,11 @@ const step = computed(() => {
   return 0
 })
 const reading = computed(() => {
-  const match = (props.job.progress || '').match(/^Reading paper (\d+)\/(\d+)/)
-  return match ? { current: Number(match[1]), total: Number(match[2]) } : null
+  const message = props.job.progress || ''
+  const match = message.match(/^(?:Reading|Loading) paper (\d+)\/(\d+)/)
+  if (match) return { current: Number(match[1]), total: Number(match[2]) }
+  const page = message.match(/^Reading P(\d+):/)
+  return page ? { current: Number(page[1]), total: props.job.papers?.length || 0 } : null
 })
 const papers = computed(() => props.job.papers || [])
 const steps = computed(() => [
@@ -46,25 +50,25 @@ function paperState(index) {
 
 <template>
   <section class="panel review-progress" aria-live="polite">
-    <p class="muted eyebrow-line">Generating review<span v-if="elapsed"> · {{ elapsedLabel }} elapsed</span></p>
-    <h2>{{ job.topic || 'Your topic' }}</h2>
+    <p class="muted eyebrow-line">{{ t('Generating review') }}<span v-if="elapsed"> · {{ elapsedLabel }} {{ t('elapsed') }}</span></p>
+    <h2>{{ job.topic || t('Your topic') }}</h2>
     <ol class="steps">
       <li v-for="(item, i) in steps" :key="item.label" :class="{ done: i < step, now: i === step }">
-        <strong>{{ i + 1 }}. {{ item.label }}</strong>
-        <span class="muted">{{ item.detail }}</span>
+        <strong>{{ i + 1 }}. {{ t(item.label) }}</strong>
+        <span class="muted">{{ t(item.detail) }}</span>
       </li>
     </ol>
-    <p class="notice progress" role="status"><span class="spinner"></span>{{ job.progress }}</p>
+    <p class="notice progress" role="status"><span class="spinner"></span>{{ t(job.progress) }}</p>
     <ul v-if="papers.length" class="reading-list">
       <li v-for="(paper, i) in papers" :key="paper.url" :class="paperState(i)">
         <span class="state" aria-hidden="true">
           <span v-if="paperState(i) === 'reading'" class="spinner small"></span>
-          <template v-else>{{ paperState(i) === 'done' ? '✓' : '○' }}</template>
+          <template v-else>{{ t(paperState(i) === 'done' ? '✓' : '○') }}</template>
         </span>
         <span>P{{ i + 1 }} · {{ paper.title }}</span>
       </li>
     </ul>
-    <p class="muted">You can keep searching while the review runs. Refreshing this page reconnects to it.</p>
-    <button v-if="canRetry" class="secondary" @click="$emit('retry')">Retry status check</button>
+    <p class="muted">{{ t('You can keep searching while the review runs. Refreshing this page reconnects to it.') }}</p>
+    <button v-if="canRetry" class="secondary" @click="$emit('retry')">{{ t('Retry status check') }}</button>
   </section>
 </template>

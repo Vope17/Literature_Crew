@@ -50,6 +50,7 @@ class HistoryStore:
                 "ai_backend": "TEXT NOT NULL DEFAULT 'openai_api'",
                 "options": "TEXT NOT NULL DEFAULT '{}'",
                 "checks": "TEXT NOT NULL DEFAULT '[]'",
+                "keywords": "TEXT NOT NULL DEFAULT '[]'",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE history ADD COLUMN {name} {definition}")
@@ -65,18 +66,18 @@ class HistoryStore:
             db.close()
 
     def create(self, *, kind, topic, papers, model=None, filters=None, source=None, notice=None,
-               ai_backend="openai_api", options=None):
+               ai_backend="openai_api", options=None, keywords=None):
         record_id, now = uuid4().hex, timestamp()
         status = "queued" if kind == "review" else "completed"
         progress = "Waiting to generate the review…" if kind == "review" else "Search saved."
         with self.connect() as db:
             db.execute("""
                 INSERT INTO history
-                (id, kind, topic, model, papers, filters, source, notice, status, progress, created_at, updated_at, ai_backend, options)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, kind, topic, model, papers, filters, source, notice, status, progress, created_at, updated_at, ai_backend, options, keywords)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (record_id, kind, topic, model, json.dumps(papers),
                   json.dumps(filters) if filters is not None else None,
-                  source, notice, status, progress, now, now, ai_backend, json.dumps(options or {})))
+                  source, notice, status, progress, now, now, ai_backend, json.dumps(options or {}), json.dumps(keywords or [])))
         return record_id
 
     def get(self, record_id):
@@ -85,7 +86,7 @@ class HistoryStore:
         if row is None:
             return None
         record = dict(row)
-        for key in ("papers", "evidence", "filters", "options", "checks"):
+        for key in ("papers", "evidence", "filters", "options", "checks", "keywords"):
             record[key] = json.loads(record[key]) if record[key] is not None else None
         return record
 
