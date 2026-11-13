@@ -538,3 +538,67 @@ def test_browser_can_switch_to_subscription_without_changing_server_environment(
     assert client.get("/api/auth/chatgpt").json()["connected"] is True
     client.cookies.clear()
     assert client.get("/api/config").json()["ai_backend"] == "openai_api"
+
+
+def journal_paper():
+    return Paper("Journal paper", ["Grace"], 2024, "https://doi.org/10.1/journal", None, "Journal abstract",
+                 doi="10.1/journal", source="OpenAlex", journal="Journal of Graphs", issn=["1234-5678"],
+                 publication_type="article", sources=["OpenAlex"])
+
+
+def test_config_lists_search_sources():
+    assert client.get("/api/config").json()["search_sources"] == [
+        {"value": "openalex", "label": "OpenAlex"}, {"value": "semantic_scholar", "label": "Semantic Scholar"},
+        {"value": "arxiv", "label": "arXiv"}]
+
+
+def test_multi_source_search_merges_reports_status_and_saves_history(monkeypatch, paper):
+    monkeypatch.setattr(app, "search_papers", lambda topic, limit, **kwargs: [paper])
+    monkeypatch.setattr(app, "search_openalex", lambda topic, limit, **kwargs: [journal_paper()])
+    monkeypatch.setattr(app, "search_semantic_scholar", lambda *a, **kw: pytest.fail("Not selected"))
+    response = client.post("/api/search", json={"topic": "graphs", "sources": ["arxiv", "openalex", "arxiv"]})
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["title"] for item in body["papers"]] == ["Graph paper", "Journal paper"]
+    assert body["papers"][1]["pdf_url"] is None and body["papers"][1]["journal"] == "Journal of Graphs"
+    assert body["source"] == "arXiv + OpenAlex" and body["notice"] is None
+    assert body["source_status"] == [{"source": "arXiv", "status": "ok", "count": 1},
+                                     {"source": "OpenAlex", "status": "ok", "count": 1}]
+    assert body["filters"]["sources"] == ["arxiv", "openalex"]
+    saved = client.get(f"/api/history/{body['history_id']}").json()
+    assert saved["papers"][1]["journal"] == "Journal of Graphs"
+
+
+def test_multi_source_search_survives_one_failing_source(monkeypatch, paper):
+    def down(*args, **kwargs):
+        raise SearchError("OpenAlex is rate-limiting requests.", 429, 60)
+
+    monkeypatch.setattr(app, "search_papers", lambda topic, limit, **kwargs: [paper])
+    monkeypatch.setattr(app, "search_openalex", down)
+    response = client.post("/api/search", json={"topic": "graphs", "sources": ["arxiv", "openalex"]})
+    assert response.status_code == 200
+    assert response.json()["source_status"][1] == {"source": "OpenAlex", "status": "unavailable", "count": 0}
+    assert "OpenAlex" in response.json()["notice"]
+
+
+def test_multi_source_search_reports_all_sources_down(monkeypatch):
+    def down(*args, **kwargs):
+        raise SearchError("busy", 429, 45)
+
+    monkeypatch.setattr(app, "search_papers", down)
+    monkeypatch.setattr(app, "search_openalex", down)
+    response = client.post("/api/search", json={"topic": "graphs", "sources": ["arxiv", "openalex"]})
+    assert response.status_code == 429 and response.headers["Retry-After"] == "45"
+
+
+@pytest.mark.parametrize("sources", [[], ["google"], ["arxiv", "openalex", "semantic_scholar", "arxiv"]])
+def test_search_rejects_invalid_sources(sources):
+    assert client.post("/api/search", json={"topic": "graphs", "sources": sources}).status_code == 422
+
+
+def test_paper_input_accepts_open_access_journal_records_and_rejects_private_links():
+    record = asdict(journal_paper())
+    assert app.PaperInput.model_validate(record).pdf_url is None
+    for field in ("url", "pdf_url"):
+        with pytest.raises(ValueError):
+            app.PaperInput.model_validate({**record, field: "https://127.0.0.1/paper.pdf"})

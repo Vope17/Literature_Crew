@@ -13,8 +13,12 @@ SOURCE_LABELS = {"openalex": "OpenAlex", "semantic_scholar": "Semantic Scholar",
 
 def identity_keys(paper):
     keys = {("url", paper.url.rstrip("/"))}
-    if doi := normalize_doi(paper.doi):
+    doi = normalize_doi(paper.doi)
+    if doi:
         keys.add(("doi", doi))
+    # arXiv's own DOIs (10.48550/arxiv.<id>) let OpenAlex records join their arXiv versions.
+    if doi and (match := re.fullmatch(r"10\.48550/arxiv\.(.+?)(?:v\d+)?", doi)):
+        keys.add(("arxiv", match[1]))
     for url in (paper.url, paper.pdf_url or ""):
         match = re.search(r"^https://arxiv\.org/(?:abs|pdf)/(.+?)(?:v\d+)?(?:\.pdf)?$", url)
         if match:

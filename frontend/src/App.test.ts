@@ -1,26 +1,37 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { config as testConfig, flushPromises, mount } from '@vue/test-utils'
+import { config as testConfig, flushPromises, mount, type VueWrapper, type DOMWrapper } from '@vue/test-utils'
 import App from './App.vue'
+import { setLocale } from './i18n'
+import type { Paper } from './types'
 
-const paper = {
+const paper: Paper = {
   title: 'Graph paper', authors: ['Ada'], year: 2025,
   url: 'https://arxiv.org/abs/2501.00001', abstract: 'Abstract',
 }
-const config = {
+const config: Record<string, unknown> = {
   model: 'openai/example', has_api_key: true, api_verified: true, max_papers: 5,
   search_areas: [{ value: 'all', label: 'All subjects' }, { value: 'computer_science', label: 'Computer science' }],
 }
-const respond = (data, ok = true, headers = {}) => Promise.resolve({
-  ok, json: () => Promise.resolve(data), headers: { get: name => headers[name] },
+const respond = (data: unknown, ok = true, headers: Record<string, string> = {}) => Promise.resolve({
+  ok, json: () => Promise.resolve(data), headers: { get: (name: string) => headers[name] },
 })
-let wrapper
+let wrapper: VueWrapper
+// Finds a button by its visible text; fails the test instead of returning undefined.
+const button = (wrapper: VueWrapper, text: string): DOMWrapper<HTMLButtonElement> => {
+  const found = wrapper.findAll('button').find(item => item.text() === text)
+  if (!found) throw new Error(`No button "${text}"`)
+  return found as DOMWrapper<HTMLButtonElement>
+}
+// Request body of the nth fetch call, parsed.
+const sentBody = (mock: { mock: { calls: unknown[][] } }, call: number) => JSON.parse(String((mock.mock.calls[call]?.[1] as RequestInit | undefined)?.body))
+const input = (wrapper: VueWrapper, selector: string) => wrapper.get(selector).element as HTMLInputElement
 beforeEach(() => {
   testConfig.global.stubs.ModelPicker = true
   const values = new Map()
   vi.stubGlobal('localStorage', {
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value)),
-    removeItem: key => values.delete(key),
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: unknown) => values.set(key, String(value)),
+    removeItem: (key: string) => values.delete(key),
     clear: () => values.clear(),
   })
 })
@@ -44,8 +55,8 @@ it('searches, selects papers, generates a review, and shows coverage', async () 
   await wrapper.get('textarea[placeholder^="e.g."]').setValue('graphs')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  expect(wrapper.get('input[type="checkbox"]').element.checked).toBe(true)
-  await wrapper.findAll('button').find(b => b.text() === 'Generate review').trigger('click')
+  expect(input(wrapper, '.paper input[type="checkbox"]').checked).toBe(true)
+  await button(wrapper, 'Generate review').trigger('click')
   await flushPromises()
   const submitted = JSON.parse(fetchMock.mock.calls[2][1].body)
   expect(submitted).not.toHaveProperty('model')
@@ -68,7 +79,7 @@ it('shows API errors and permits retry', async () => {
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   expect(wrapper.get('[role="alert"]').text()).toBe('arXiv unavailable')
-  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(false)
+  expect(input(wrapper, '.search button[type="submit"]').disabled).toBe(false)
 })
 
 it('limits selection to five papers', async () => {
@@ -80,10 +91,10 @@ it('limits selection to five papers', async () => {
   await wrapper.get('textarea[placeholder^="e.g."]').setValue('graphs')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  const boxes = wrapper.findAll('input[type="checkbox"]')
+  const boxes = wrapper.findAll('.paper input[type="checkbox"]')
   await boxes[3].setValue(true)
   await boxes[4].setValue(true)
-  expect(boxes[5].element.disabled).toBe(true)
+  expect((boxes[5].element as HTMLInputElement).disabled).toBe(true)
 })
 
 it('honors the search retry countdown', async () => {
@@ -97,10 +108,10 @@ it('honors the search retry countdown', async () => {
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   expect(wrapper.get('.search button[type="submit"]').text()).toBe('Retry in 60s')
-  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(true)
+  expect(input(wrapper, '.search button[type="submit"]').disabled).toBe(true)
   vi.advanceTimersByTime(60_000)
   await flushPromises()
-  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(false)
+  expect(input(wrapper, '.search button[type="submit"]').disabled).toBe(false)
 })
 
 it('labels fallback results and permits review generation', async () => {
@@ -117,7 +128,7 @@ it('labels fallback results and permits review generation', async () => {
   await flushPromises()
   expect(wrapper.get('.results .warning').text()).toContain('Semantic Scholar')
   expect(wrapper.get('.results .section-heading').text()).toContain('results from Semantic Scholar')
-  expect(wrapper.findAll('button').find(b => b.text() === 'Generate review').element.disabled).toBe(false)
+  expect(button(wrapper, 'Generate review').element.disabled).toBe(false)
   expect(wrapper.find('[role="alert"]').exists()).toBe(false)
 })
 
@@ -169,11 +180,12 @@ it('submits filters and preserves the applied summary until the next search', as
   await flushPromises()
   expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
     topic: 'graphs', limit: 5, area: 'computer_science', year_from: 2020, year_to: 2025, filter_overrides: ['area', 'years'],
+    sources: ['openalex', 'semantic_scholar', 'arxiv'],
   })
   expect(wrapper.get('[data-testid="applied-filters"]').text()).toBe('Computer science · 2020–2025')
-  await wrapper.findAll('button').find(button => button.text() === 'Reset filters').trigger('click')
-  expect(wrapper.get('[data-testid="area-filter"]').element.value).toBe('all')
-  expect(wrapper.get('[data-testid="year-from"]').element.value).toBe('')
+  await button(wrapper, 'Reset filters').trigger('click')
+  expect(input(wrapper, '[data-testid="area-filter"]').value).toBe('all')
+  expect(input(wrapper, '[data-testid="year-from"]').value).toBe('')
   expect(wrapper.get('[data-testid="applied-filters"]').text()).toBe('Computer science · 2020–2025')
 })
 
@@ -194,7 +206,7 @@ it('shows extracted keywords while preserving a long original topic and chosen c
   const searched = JSON.parse(fetchMock.mock.calls[1][1].body)
   expect(searched).toMatchObject({ topic, model: 'openai/chosen', connection_id: 'browser-connection' })
   expect(wrapper.get('[data-testid="search-keywords"]').text()).toContain('machine learning · education')
-  await wrapper.findAll('button').find(b => b.text() === 'Generate review').trigger('click')
+  await button(wrapper, 'Generate review').trigger('click')
   await flushPromises()
   expect(JSON.parse(fetchMock.mock.calls[2][1].body).topic).toBe(topic)
 })
@@ -209,7 +221,7 @@ it('rejects reversed year ranges before making a search request', async () => {
   await wrapper.get('[data-testid="year-to"]').setValue('2020')
   await wrapper.get('form.search').trigger('submit')
   expect(wrapper.get('[role="alert"]').text()).toContain('Start year')
-  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(true)
+  expect(input(wrapper, '.search button[type="submit"]').disabled).toBe(true)
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
 
@@ -233,11 +245,11 @@ it('polls review progress while allowing another search, then shows the saved re
   await wrapper.get('textarea[placeholder^="e.g."]').setValue('graphs')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  await wrapper.findAll('button').find(b => b.text() === 'Generate review').trigger('click')
+  await button(wrapper, 'Generate review').trigger('click')
   await flushPromises()
   expect(wrapper.get('.review-progress').text()).toContain('Reading paper 1/1')
-  expect(wrapper.get('.search button[type="submit"]').element.disabled).toBe(false)
-  expect(wrapper.get('textarea[placeholder^="e.g."]').element.disabled).toBe(false)
+  expect(input(wrapper, '.search button[type="submit"]').disabled).toBe(false)
+  expect(input(wrapper, 'textarea[placeholder^="e.g."]').disabled).toBe(false)
   expect(window.localStorage.getItem('literature-active-review')).toBe('job')
   await wrapper.get('textarea[placeholder^="e.g."]').setValue('different topic')
   await wrapper.get('form.search').trigger('submit')
@@ -248,7 +260,7 @@ it('polls review progress while allowing another search, then shows the saved re
   expect(wrapper.get('.report h2').text()).toBe('Review: graphs')
   expect(wrapper.get('.markdown h1').text()).toBe('Saved review')
   expect(window.localStorage.getItem('literature-active-review')).toBeNull()
-  expect(fetchMock.mock.calls.at(-1)[0]).toBe('/api/reviews/job')
+  expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/reviews/job')
 })
 
 it('reconnects to an active review after refresh', async () => {
@@ -275,7 +287,7 @@ it('shows failed jobs and enables generation again', async () => {
   await wrapper.get('textarea[placeholder^="e.g."]').setValue('graphs')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  const generate = wrapper.findAll('button').find(b => b.text() === 'Generate review')
+  const generate = button(wrapper, 'Generate review')
   await generate.trigger('click')
   await flushPromises()
   expect(wrapper.get('[role="alert"]').text()).toContain('Review failed')
@@ -293,7 +305,7 @@ it('keeps a job recoverable after a polling connection error', async () => {
   wrapper = mount(App)
   await flushPromises()
   expect(window.localStorage.getItem('literature-active-review')).toBe('job')
-  await wrapper.findAll('button').find(b => b.text() === 'Retry status check').trigger('click')
+  await button(wrapper, 'Retry status check').trigger('click')
   await flushPromises()
   expect(wrapper.get('.markdown h1').text()).toBe('Recovered')
 })
@@ -342,7 +354,7 @@ it('restores saved search filters and papers from history', async () => {
   await flushPromises()
   await wrapper.get('.history-item').trigger('click')
   await flushPromises()
-  expect(wrapper.get('[data-testid="area-filter"]').element.value).toBe('computer_science')
+  expect(input(wrapper, '[data-testid="area-filter"]').value).toBe('computer_science')
   expect(wrapper.get('[data-testid="applied-filters"]').text()).toBe('Computer science · 2020–2025')
   expect(wrapper.findAll('.paper')).toHaveLength(1)
 })
@@ -363,7 +375,7 @@ it('links citations to the coverage table and lists report sections', async () =
   expect(wrapper.find('.toc').exists()).toBe(false)
   await wrapper.get('.toc-toggle').trigger('click')
   expect(wrapper.findAll('.toc a').map(a => a.text())).toEqual(['Overview', 'Research gaps', 'Sources & coverage'])
-  expect(wrapper.get('.markdown h2').attributes('id')).toBe(wrapper.findAll('.toc a')[1].attributes('href').slice(1))
+  expect(wrapper.get('.markdown h2').attributes('id')).toBe(wrapper.findAll('.toc a')[1]?.attributes('href')?.slice(1))
   expect(wrapper.get('#source-P2 .cov').classes()).toContain('warning')
   await wrapper.findAll('.toc a')[1].trigger('click')
   expect(wrapper.find('.toc').exists()).toBe(false)
@@ -403,7 +415,7 @@ it('offers regeneration only for the selection that produced the shown review', 
   await flushPromises()
   const action = () => wrapper.get('.selection-bar button:last-child')
   expect(action().text()).toBe('Regenerate review')
-  await wrapper.findAll('input[type="checkbox"]')[1].setValue(false)
+  await wrapper.findAll('.paper input[type="checkbox"]')[1]?.setValue(false)
   expect(action().text()).toBe('Generate review')
 })
 
@@ -419,14 +431,14 @@ it('allows subscription CLI generation without an API key and submits study deta
   vi.stubGlobal('fetch', fetchMock)
   wrapper = mount(App)
   await flushPromises()
-  expect(wrapper.get('[data-testid="ai-connection-mode"]').element.value).toBe('claude_cli')
+  expect(input(wrapper, '[data-testid="ai-connection-mode"]').value).toBe('claude_cli')
   await wrapper.get('textarea[placeholder^="e.g."]').setValue('graphs')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
   await wrapper.get('[data-testid="output-mode"]').setValue('introduction')
   await wrapper.get('[data-testid="study-units"]').setValue('chip layouts')
   await wrapper.get('[data-testid="study-research_question"]').setValue('Does the method transfer?')
-  const generate = wrapper.findAll('button').find(button => button.text() === 'Generate introduction')
+  const generate = button(wrapper, 'Generate introduction')
   expect(generate.element.disabled).toBe(false)
   await generate.trigger('click')
   await flushPromises()
@@ -444,11 +456,11 @@ it('offers the last five calendar years without preventing historical literature
   await flushPromises()
   const year = new Date().getFullYear()
   await wrapper.get('[data-testid="recent-years"]').trigger('click')
-  expect(wrapper.get('[data-testid="year-from"]').element.value).toBe(String(year - 4))
-  expect(wrapper.get('[data-testid="year-to"]').element.value).toBe(String(year))
-  await wrapper.findAll('button').find(button => button.text() === 'Reset filters').trigger('click')
-  expect(wrapper.get('[data-testid="year-from"]').element.value).toBe('')
-  expect(wrapper.get('[data-testid="year-to"]').element.value).toBe('')
+  expect(input(wrapper, '[data-testid="year-from"]').value).toBe(String(year - 4))
+  expect(input(wrapper, '[data-testid="year-to"]').value).toBe(String(year))
+  await button(wrapper, 'Reset filters').trigger('click')
+  expect(input(wrapper, '[data-testid="year-from"]').value).toBe('')
+  expect(input(wrapper, '[data-testid="year-to"]').value).toBe('')
 })
 
 it('restores introduction settings and shows citation checks with supplied page links', async () => {
@@ -472,8 +484,8 @@ it('restores introduction settings and shows citation checks with supplied page 
   await flushPromises()
   await wrapper.get('.history-item').trigger('click')
   await flushPromises()
-  expect(wrapper.get('[data-testid="output-mode"]').element.value).toBe('introduction')
-  expect(wrapper.get('[data-testid="study-units"]').element.value).toBe('chip layouts')
+  expect(input(wrapper, '[data-testid="output-mode"]').value).toBe('introduction')
+  expect(input(wrapper, '[data-testid="study-units"]').value).toBe('chip layouts')
   expect(wrapper.get('.report-head h2').text()).toBe('Introduction: graphs')
   expect(wrapper.get('.markdown a.cite').text()).toBe('P1, p. 7')
   expect(wrapper.get('.report-checks').text()).toContain('Limited text coverage')
@@ -510,7 +522,7 @@ it('enables Codex generation only after the frontend login completes', async () 
   await flushPromises()
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  expect(wrapper.get('.selection-bar button:last-child').element.disabled).toBe(false)
+  expect(input(wrapper, '.selection-bar button:last-child').disabled).toBe(false)
   expect(wrapper.get('.connection-status').text()).toContain('connected')
 })
 
@@ -522,13 +534,13 @@ it('keeps appearance and AI in gear settings and verifies API before enabling mo
   wrapper = mount(App)
   await flushPromises()
   expect(wrapper.get('summary[aria-label="Settings"]').text()).toContain('Settings')
-  expect(wrapper.get('.settings .theme-picker').exists()).toBe(true)
+  expect(wrapper.find('.settings .theme-picker').exists()).toBe(true)
   expect(wrapper.findComponent({ name: 'ModelPicker' }).props('enabled')).toBe(false)
   await wrapper.get('[data-testid="api-key"]').setValue('private-api-key')
   await wrapper.get('.api-connection').trigger('submit')
   await flushPromises()
   expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ backend: 'openai_api', api_key: 'private-api-key' })
-  expect(wrapper.get('[data-testid="api-key"]').element.value).toBe('')
+  expect(input(wrapper, '[data-testid="api-key"]').value).toBe('')
   expect(wrapper.findComponent({ name: 'ModelPicker' }).props('enabled')).toBe(true)
   await wrapper.get('[data-testid="api-key"]').setValue('replacement-key')
   expect(wrapper.findComponent({ name: 'ModelPicker' }).props('enabled')).toBe(false)
@@ -537,7 +549,7 @@ it('keeps appearance and AI in gear settings and verifies API before enabling mo
 it('applies AI filters, translates the interface, preserves manual choices and resets automatic state', async () => {
   const description = '我想找linux網路相關的推薦一下，2025-2026的'
   let searchCount = 0
-  const fetchMock = vi.fn(path => {
+  const fetchMock = vi.fn((path: string, _init?: RequestInit) => {
     if (path === '/api/config') return respond(config)
     if (path === '/api/search') {
       searchCount++
@@ -556,27 +568,185 @@ it('applies AI filters, translates the interface, preserves manual choices and r
   await wrapper.get('textarea').setValue(description)
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  expect(wrapper.get('[data-testid="year-from"]').element.value).toBe('2025')
-  expect(wrapper.get('[data-testid="year-to"]').element.value).toBe('2026')
-  expect(wrapper.get('[data-testid="area-filter"]').element.value).toBe('computer_science')
+  expect(input(wrapper, '[data-testid="year-from"]').value).toBe('2025')
+  expect(input(wrapper, '[data-testid="year-to"]').value).toBe('2026')
+  expect(input(wrapper, '[data-testid="area-filter"]').value).toBe('computer_science')
   expect(wrapper.get('[data-testid="applied-filters"]').text()).toBe('資訊科學 · 2025–2026')
-  expect(wrapper.get('[data-testid="output-language"]').element.value).toBe('zh-TW')
+  expect(input(wrapper, '[data-testid="output-language"]').value).toBe('zh-TW')
   await wrapper.get('[data-testid="output-language"]').setValue('en')
   await wrapper.get('[data-testid="interface-language"]').setValue('en')
   expect(wrapper.get('[data-testid="applied-filters"]').text()).toBe('Computer science · 2025–2026')
-  expect(wrapper.get('[data-testid="output-language"]').element.value).toBe('en')
+  expect(input(wrapper, '[data-testid="output-language"]').value).toBe('en')
   // Applied AI values are not sent back as manual overrides on the next query.
   await wrapper.get('textarea').setValue('Another topic without dates')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  expect(JSON.parse(fetchMock.mock.calls[2][1].body).filter_overrides).toEqual([])
-  expect(wrapper.get('[data-testid="year-from"]').element.value).toBe('')
+  expect(sentBody(fetchMock, 2).filter_overrides).toEqual([])
+  expect(input(wrapper, '[data-testid="year-from"]').value).toBe('')
   await wrapper.get('[data-testid="year-from"]').setValue('2020')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  expect(JSON.parse(fetchMock.mock.calls[3][1].body).filter_overrides).toEqual(['years'])
-  await wrapper.findAll('button').find(button => button.text() === 'Reset filters').trigger('click')
+  expect(sentBody(fetchMock, 3).filter_overrides).toEqual(['years'])
+  await button(wrapper, 'Reset filters').trigger('click')
   await wrapper.get('form.search').trigger('submit')
   await flushPromises()
-  expect(JSON.parse(fetchMock.mock.calls[4][1].body).filter_overrides).toEqual([])
+  expect(sentBody(fetchMock, 4).filter_overrides).toEqual([])
+})
+
+const journalPaper: Paper = {
+  title: 'Journal paper', authors: ['Grace Hopper'], year: 2024, url: 'https://doi.org/10.1/journal',
+  pdf_url: null, abstract: 'Journal abstract', doi: '10.1/journal', journal: 'Journal of Graphs',
+  publication_type: 'JournalArticle', sources: ['OpenAlex', 'Semantic Scholar'],
+}
+const arxivPaper: Paper = {
+  ...paper, pdf_url: 'https://arxiv.org/pdf/2501.00001', sources: ['arXiv'], source: 'arXiv',
+}
+const sourceConfig = {
+  ...config,
+  search_sources: [
+    { value: 'openalex', label: 'OpenAlex' }, { value: 'semantic_scholar', label: 'Semantic Scholar' },
+    { value: 'arxiv', label: 'arXiv' },
+  ],
+}
+
+async function searchFor(topic = 'graphs') {
+  await wrapper.get('textarea[placeholder^="e.g."]').setValue(topic)
+  await wrapper.get('form.search').trigger('submit')
+  await flushPromises()
+}
+
+it('lets users pick search sources, keeps one selected, remembers the choice and sends it', async () => {
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => respond(sourceConfig))
+    .mockImplementationOnce(() => respond({ papers: [arxivPaper] }))
+  vi.stubGlobal('fetch', fetchMock)
+  wrapper = mount(App)
+  await flushPromises()
+  expect(wrapper.findAll('.source-option')).toHaveLength(3)
+  await wrapper.get('[data-testid="source-openalex"]').setValue(false)
+  await wrapper.get('[data-testid="source-semantic_scholar"]').setValue(false)
+  expect(input(wrapper, '[data-testid="source-arxiv"]').disabled).toBe(true)
+  await wrapper.get('[data-testid="source-arxiv"]').trigger('change')
+  expect(input(wrapper, '[data-testid="source-arxiv"]').checked).toBe(true)
+  expect(window.localStorage.getItem('literature-sources')).toBe('["arxiv"]')
+  await searchFor()
+  expect(sentBody(fetchMock, 1).sources).toEqual(['arxiv'])
+  expect(wrapper.get('footer').text()).toContain('arXiv')
+  expect(wrapper.get('footer').text()).not.toContain('OpenAlex')
+})
+
+it('restores the remembered sources and ignores corrupt storage', async () => {
+  window.localStorage.setItem('literature-sources', '["openalex","bogus"]')
+  vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => respond(sourceConfig)))
+  wrapper = mount(App)
+  await flushPromises()
+  expect(input(wrapper, '[data-testid="source-openalex"]').checked).toBe(true)
+  expect(input(wrapper, '[data-testid="source-arxiv"]').checked).toBe(false)
+  wrapper.unmount()
+  window.localStorage.setItem('literature-sources', '{not json')
+  vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => respond(sourceConfig)))
+  wrapper = mount(App)
+  await flushPromises()
+  expect(wrapper.findAll('.source-option input').every(box => (box.element as HTMLInputElement).checked)).toBe(true)
+})
+
+it('shows journal, DOI, catalogs and full-text status on each paper', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => respond(sourceConfig))
+    .mockImplementationOnce(() => respond({
+      papers: [journalPaper, arxivPaper], source: 'OpenAlex + Semantic Scholar + arXiv',
+      source_status: [
+        { source: 'OpenAlex', status: 'ok', count: 1 }, { source: 'Semantic Scholar', status: 'ok', count: 1 },
+        { source: 'arXiv', status: 'ok', count: 1 },
+      ],
+    })))
+  wrapper = mount(App)
+  await flushPromises()
+  await searchFor()
+  const cards = wrapper.findAll('.paper')
+  expect(cards).toHaveLength(2)
+  const first = cards[0]!
+  expect(first.get('[data-testid="paper-journal"]').text()).toBe('Journal of Graphs · Journal Article')
+  expect(first.get('[data-testid="paper-doi"]').attributes('href')).toBe('https://doi.org/10.1/journal')
+  expect(first.get('[data-testid="paper-doi"]').text()).toContain('10.1/journal')
+  expect(first.findAll('.tag').map(tag => tag.text())).toEqual(['OpenAlex', 'Semantic Scholar', 'Abstract only'])
+  expect(first.get('.paper-links a').text()).toBe('View paper ↗')
+  const second = cards[1]!
+  expect(second.find('[data-testid="paper-doi"]').exists()).toBe(false)
+  expect(second.get('[data-testid="full-text-state"]').text()).toBe('Open full text')
+  expect(second.get('.paper-links a').text()).toBe('View on arXiv ↗')
+  expect(wrapper.get('[data-testid="source-status"]').text()).toContain('Semantic Scholar')
+  expect(wrapper.get('.results .section-heading').text()).toContain('OpenAlex + Semantic Scholar + arXiv')
+})
+
+it('warns before generating when a selected paper has no open full text', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => respond(sourceConfig))
+    .mockImplementationOnce(() => respond({ papers: [arxivPaper, journalPaper] })))
+  wrapper = mount(App)
+  await flushPromises()
+  await searchFor()
+  expect(wrapper.get('[data-testid="abstract-only-note"]').text()).toBe('1 without open full text: abstract only')
+  await wrapper.findAll('.paper input[type="checkbox"]')[1]?.setValue(false)
+  expect(wrapper.find('[data-testid="abstract-only-note"]').exists()).toBe(false)
+})
+
+it('reports unavailable sources and translates the server notice', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => respond(sourceConfig))
+    .mockImplementationOnce(() => respond({
+      papers: [arxivPaper], source: 'arXiv',
+      notice: 'Some sources are unavailable: OpenAlex. Results may be incomplete.',
+      source_status: [{ source: 'OpenAlex', status: 'unavailable', count: 0 }, { source: 'arXiv', status: 'ok', count: 1 }],
+    })))
+  wrapper = mount(App)
+  await flushPromises()
+  await searchFor()
+  expect(wrapper.get('.results .warning').text()).toContain('OpenAlex')
+  expect(wrapper.get('.source-status li.unavailable').text()).toContain('unavailable')
+  expect(wrapper.findAll('.source-status li')).toHaveLength(2)
+  expect(wrapper.findAll('button').find(item => item.text() === 'Generate review')?.attributes('disabled')).toBeUndefined()
+  setLocale('zh-TW', false)
+  await flushPromises()
+  expect(wrapper.get('.results .warning').text()).toBe('部分來源暫時無法使用：OpenAlex。結果可能不完整。')
+  expect(wrapper.get('.source-status li.unavailable').text()).toContain('無法使用')
+  setLocale('en', false)
+})
+
+it('restores the sources of a saved search and shows them in the applied summary', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockImplementationOnce(() => respond(sourceConfig))
+    .mockImplementationOnce(() => respond({ items: [{
+      id: 'old-search', kind: 'search', topic: 'graphs', status: 'completed', paper_count: 1,
+      created_at: '2026-01-01T00:00:00Z',
+    }], has_more: false }))
+    .mockImplementationOnce(() => respond({
+      id: 'old-search', kind: 'search', topic: 'graphs', papers: [journalPaper], source: 'OpenAlex',
+      filters: { area: 'all', year_from: null, year_to: null, sources: ['openalex'] },
+    })))
+  wrapper = mount(App)
+  await flushPromises()
+  await wrapper.get('[data-testid="history-toggle"]').trigger('click')
+  await flushPromises()
+  await wrapper.get('.history-item').trigger('click')
+  await flushPromises()
+  expect(input(wrapper, '[data-testid="source-openalex"]').checked).toBe(true)
+  expect(input(wrapper, '[data-testid="source-arxiv"]').checked).toBe(false)
+  expect(wrapper.get('[data-testid="applied-filters"]').text()).toBe('All subjects · Any year · OpenAlex')
+  expect(wrapper.get('[data-testid="paper-journal"]').text()).toContain('Journal of Graphs')
+})
+
+it('submits a paper without an open PDF to the review request unchanged', async () => {
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => respond(sourceConfig))
+    .mockImplementationOnce(() => respond({ papers: [journalPaper] }))
+    .mockImplementationOnce(() => respond({ id: 'review-2', status: 'queued' }))
+    .mockImplementationOnce(() => respond({ id: 'review-2', status: 'completed', review: '# Done', evidence: [] }))
+  vi.stubGlobal('fetch', fetchMock)
+  wrapper = mount(App)
+  await flushPromises()
+  await searchFor()
+  await button(wrapper, 'Generate review').trigger('click')
+  await flushPromises()
+  expect(sentBody(fetchMock, 2).papers).toEqual([journalPaper])
 })

@@ -1,13 +1,12 @@
-<script setup>
+<script setup lang="ts">
 import { t } from './i18n'
 import { computed } from 'vue'
+import type { ReviewJob } from './types'
 
-const props = defineProps({
-  job: { type: Object, required: true },
-  elapsed: { type: Number, default: 0 },
-  canRetry: { type: Boolean, default: false },
+const props = withDefaults(defineProps<{ job: ReviewJob; elapsed?: number; canRetry?: boolean }>(), {
+  elapsed: 0, canRetry: false,
 })
-defineEmits(['retry'])
+defineEmits<{ retry: [] }>()
 
 // The backend reports free-text progress; map its known messages onto three steps.
 const step = computed(() => {
@@ -40,7 +39,7 @@ const elapsedLabel = computed(() => {
   return minutes ? `${minutes}m ${props.elapsed % 60}s` : `${props.elapsed}s`
 })
 
-function paperState(index) {
+function paperState(index: number) {
   if (step.value > 0) return 'done'
   if (!reading.value) return 'waiting'
   if (index + 1 < reading.value.current) return 'done'

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import pymupdf
-import requests
 from paper_urls import download_pdf
 from pydantic import Field, model_validator
 

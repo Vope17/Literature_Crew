@@ -7,7 +7,9 @@ import semantic_search as search
 from search_filters import SearchFilters
 
 PAYLOAD = {"data": [
-    {"title": "Without arXiv link", "year": 2025, "externalIds": {"DOI": "10.1/example"}},
+    {"title": "Without arXiv link", "year": 2025, "externalIds": {"DOI": "10.1/Example"},
+     "openAccessPdf": {"url": "https://publisher.example/open.pdf"},
+     "journal": {"name": "Journal of Graphs"}, "publicationTypes": ["JournalArticle"]},
     {"title": "Graphs", "year": 2025, "abstract": "Evidence", "authors": [{"name": "Ada"}],
      "externalIds": {"ArXiv": "2501.00001", "DOI": "10.2/example"}},
     {"title": "No abstract", "year": 2024, "abstract": None,
@@ -33,15 +35,33 @@ def response(status=200, headers=None):
     return result
 
 
-def test_fallback_converts_only_arxiv_linked_papers():
+def test_papers_without_arxiv_id_are_kept_with_doi_and_open_pdf():
     papers = search.parse_papers(PAYLOAD, 5)
-    assert len(papers) == 2
-    assert papers[0].title == "Graphs"
-    assert papers[0].authors == ["Ada"]
-    assert papers[0].pdf_url == "https://arxiv.org/pdf/2501.00001"
-    assert papers[0].doi == "10.2/example"
-    assert "not provided" in papers[1].abstract
+    assert [paper.title for paper in papers] == ["Without arXiv link", "Graphs", "No abstract"]
+    journal = papers[0]
+    assert journal.url == "https://doi.org/10.1/example" and journal.doi == "10.1/example"
+    assert journal.pdf_url == "https://publisher.example/open.pdf"
+    assert journal.journal == "Journal of Graphs" and journal.publication_type == "JournalArticle"
+    assert journal.source == "Semantic Scholar" and journal.sources == ["Semantic Scholar"]
+    assert papers[1].authors == ["Ada"]
+    assert papers[1].url == "https://arxiv.org/abs/2501.00001"
+    assert papers[1].pdf_url == "https://arxiv.org/pdf/2501.00001"
+    assert papers[1].doi == "10.2/example"
+    assert papers[2].abstract == ""
     assert len(search.parse_papers(PAYLOAD, 1)) == 1
+
+
+def test_untrusted_links_and_ids_are_dropped():
+    payload = {"data": [
+        {"title": "Private host", "year": 2025, "url": "https://127.0.0.1/paper"},
+        {"title": "Not HTTPS", "year": 2025, "url": "http://example.org/paper"},
+        {"title": "Bad pdf", "year": 2025, "externalIds": {"DOI": "10.3/x"},
+         "openAccessPdf": {"url": "http://example.org/a.pdf"}},
+        "not a record",
+    ]}
+    papers = search.parse_papers(payload, 5)
+    assert [paper.title for paper in papers] == ["Bad pdf"]
+    assert papers[0].pdf_url is None
 
 
 def test_fallback_rejects_malformed_response():
@@ -82,11 +102,11 @@ def test_fallback_filters_change_request_and_cache(monkeypatch, clock):
     client = search.SemanticScholarSearch()
     filters = SearchFilters(area="computer_science", year_from=2025, year_to=2025)
     papers = client.search("graphs", filters=filters)
-    assert [paper.year for paper in papers] == [2025]
+    assert [paper.year for paper in papers] == [2025, 2025]
     params = get.call_args.kwargs["params"]
     assert params["fieldsOfStudy"] == "Computer Science"
     assert params["year"] == "2025-2025"
     client.search("graphs", filters=filters)
     assert get.call_count == 1
-    assert len(client.search("graphs")) == 2
+    assert len(client.search("graphs")) == 3
     assert get.call_count == 2

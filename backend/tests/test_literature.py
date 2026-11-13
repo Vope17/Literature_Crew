@@ -27,6 +27,15 @@ def test_failed_pdf_uses_labelled_abstract(monkeypatch, paper):
     assert "private" not in item["error"]
 
 
+def test_paper_without_open_pdf_or_abstract_never_reaches_the_analyst_empty(monkeypatch):
+    monkeypatch.setattr(literature, "load_pdf", lambda *a, **kw: pytest.fail("No PDF to download"))
+    closed = literature.Paper("Closed paper", ["Ada"], 2024, "https://doi.org/10.1/closed", None, "",
+                              doi="10.1/closed", journal="Journal of Graphs")
+    item = literature.collect_evidence([closed], topic="graphs", settings=literature.AISettings("openai_api", "example", "key"))[0]
+    assert item["coverage"] == "abstract only" and "make no claims" in item["text"]
+    assert "No open full text" in item["error"] and item["journal"] == "Journal of Graphs"
+
+
 @pytest.fixture
 def read_evidence(monkeypatch):
     monkeypatch.setattr(literature, "load_pdf", lambda *a, **kw: b"PDF")

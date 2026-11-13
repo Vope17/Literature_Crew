@@ -1,8 +1,10 @@
-<script setup>
+<script setup lang="ts">
 import { t } from './i18n'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-const preference = ref('system')
+type Preference = 'system' | 'light' | 'dark'
+const themes: readonly string[] = ['light', 'dark', 'system']
+const preference = ref<Preference>('system')
 const media = window.matchMedia?.('(prefers-color-scheme: dark)')
 
 function apply() {
@@ -17,16 +19,16 @@ function change() {
   catch { /* The selected appearance still applies for this page. */ }
 }
 
-function sync(event) {
+function sync(event: StorageEvent) {
   if (event.key !== 'literature-theme') return
-  preference.value = ['light', 'dark', 'system'].includes(event.newValue) ? event.newValue : 'system'
+  preference.value = event.newValue !== null && themes.includes(event.newValue) ? event.newValue as Preference : 'system'
   apply()
 }
 
 onMounted(() => {
   try {
     const saved = localStorage.getItem('literature-theme')
-    if (['light', 'dark', 'system'].includes(saved)) preference.value = saved
+    if (saved !== null && themes.includes(saved)) preference.value = saved as Preference
   } catch { /* Use the system appearance when storage is unavailable. */ }
   apply()
   media?.addEventListener('change', apply)

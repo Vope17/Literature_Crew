@@ -1,18 +1,20 @@
-<script setup>
+<script setup lang="ts">
 import { t } from './i18n'
+import { errorMessage } from './api'
 import { onBeforeUnmount, ref, watch } from 'vue'
 
-const props = defineProps({
-  enabled: Boolean, disabled: Boolean, modelValue: { type: String, default: '' },
-  defaultModel: { type: String, default: '' }, backend: { type: String, default: '' },
-  connectionId: { type: String, default: '' },
-})
-const emit = defineEmits(['update:modelValue', 'connection-error'])
-const models = ref([])
+interface ModelOption { id: string; name: string }
+
+const props = withDefaults(defineProps<{
+  enabled?: boolean; disabled?: boolean; modelValue?: string
+  defaultModel?: string; backend?: string; connectionId?: string
+}>(), { modelValue: '', defaultModel: '', backend: '', connectionId: '' })
+const emit = defineEmits<{ 'update:modelValue': [value: string]; 'connection-error': [message: string] }>()
+const models = ref<ModelOption[]>([])
 const loading = ref(false)
 const error = ref('')
 const notice = ref('')
-let controller
+let controller: AbortController | undefined
 let sequence = 0
 
 async function load() {
@@ -36,7 +38,7 @@ async function load() {
     notice.value = data.notice || ''
     if (props.modelValue && !models.value.some(item => item.id === props.modelValue)) emit('update:modelValue', '')
   } catch (err) {
-    if (ticket === sequence) error.value = err.name === 'AbortError' ? 'Model lookup timed out. Please retry.' : err.message
+    if (ticket === sequence) error.value = err instanceof Error && err.name === 'AbortError' ? 'Model lookup timed out. Please retry.' : errorMessage(err)
   } finally {
     clearTimeout(timeout)
     if (ticket === sequence) loading.value = false
@@ -60,7 +62,7 @@ onBeforeUnmount(() => { ++sequence; controller?.abort() })
   <div v-if="enabled" class="model-picker">
     <label>{{ t('Model') }}
       <select :value="modelValue" data-testid="model-select" :disabled="loading || disabled"
-        @change="emit('update:modelValue', $event.target.value)">
+        @change="emit('update:modelValue', ($event.target as HTMLSelectElement).value)">
         <option value="">{{ t(defaultModel ? `Default (${defaultModel})` : 'Select a model') }}</option>
         <option v-for="item in models" :key="item.id" :value="item.id">{{ item.name }}</option>
       </select>

@@ -1,18 +1,28 @@
-<script setup>
+<script setup lang="ts">
 import { t } from './i18n'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { errorMessage } from './api'
 
-const emit = defineEmits(['connected'])
-const state = ref({ status: 'checking', connected: false })
+interface LoginState {
+  status: string
+  connected: boolean
+  plan?: string
+  user_code?: string
+  verification_url?: string
+  message?: string
+}
+
+const emit = defineEmits<{ connected: [value: boolean] }>()
+const state = ref<LoginState>({ status: 'checking', connected: false })
 const busy = ref(false)
 const error = ref('')
 const copied = ref(false)
-let timer
+let timer: ReturnType<typeof setTimeout> | undefined
 let alive = true
-let controller
+let controller: AbortController | undefined
 let sequence = 0
 
-async function call(action = '') {
+async function call(action = ''): Promise<LoginState> {
   controller?.abort()
   const current = new AbortController()
   controller = current
@@ -40,11 +50,11 @@ async function refresh() {
     error.value = ''
     if (data.status === 'pending') timer = setTimeout(refresh, 2000)
   } catch (err) {
-    if (alive && ticket === sequence) error.value = err.message || 'Could not check ChatGPT sign-in. Retry the status check.'
+    if (alive && ticket === sequence) error.value = errorMessage(err) || 'Could not check ChatGPT sign-in. Retry the status check.'
   }
 }
 
-async function change(action) {
+async function change(action: string) {
   const ticket = ++sequence
   clearTimeout(timer)
   busy.value = true
@@ -57,12 +67,12 @@ async function change(action) {
     emit('connected', data.connected === true && data.status !== 'pending')
     if (data.status === 'pending') timer = setTimeout(refresh, 2000)
   } catch (err) {
-    if (alive && ticket === sequence) error.value = err.message || 'Could not start ChatGPT sign-in. Please retry.'
+    if (alive && ticket === sequence) error.value = errorMessage(err) || 'Could not start ChatGPT sign-in. Please retry.'
   } finally { if (alive) busy.value = false }
 }
 
 async function copyCode() {
-  try { await navigator.clipboard.writeText(state.value.user_code); copied.value = true }
+  try { await navigator.clipboard.writeText(state.value.user_code ?? ''); copied.value = true }
   catch { error.value = 'Select and copy the code, then enter it on the OpenAI page.' }
 }
 

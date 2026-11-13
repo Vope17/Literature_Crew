@@ -1,9 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ModelPicker from './ModelPicker.vue'
 
-let wrapper
-const response = (data, ok = true) => Promise.resolve({ ok, json: async () => data })
+let wrapper: VueWrapper | undefined
+const response = (data: unknown, ok = true) => Promise.resolve({ ok, json: async () => data })
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 
 it('loads models after connection and emits the selected provider ID', async () => {
@@ -14,10 +14,10 @@ it('loads models after connection and emits the selected provider ID', async () 
   await wrapper.setProps({ enabled: true })
   await flushPromises()
   await wrapper.get('select').setValue('openai/chosen')
-  expect(wrapper.emitted('update:modelValue').at(-1)).toEqual(['openai/chosen'])
+  expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual(['openai/chosen'])
   await wrapper.setProps({ enabled: false })
   expect(wrapper.find('select').exists()).toBe(false)
-  expect(wrapper.emitted('update:modelValue').at(-1)).toEqual([''])
+  expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([''])
 })
 
 it('shows catalog failures and allows refresh without losing a valid choice', async () => {

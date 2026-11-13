@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { onMounted } from 'vue'
 import { locale, t, setLocale, loadLocale } from './i18n'
 onMounted(loadLocale)
@@ -7,7 +7,7 @@ onMounted(loadLocale)
 <template>
   <label>{{ t('Interface language') }}
     <select :value="locale" data-testid="interface-language" :aria-label="t('Interface language')"
-      @change="setLocale($event.target.value)">
+      @change="setLocale(($event.target as HTMLSelectElement).value)">
       <option value="en">English</option>
       <option value="zh-TW">繁體中文</option>
     </select>

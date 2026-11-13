@@ -22,10 +22,7 @@ def document(count=7, text=True):
 
 
 def mock_download(monkeypatch, data):
-    response = MagicMock()
-    response.__enter__.return_value = response
-    response.iter_content.return_value = [data]
-    monkeypatch.setattr(pdf.requests, 'get', lambda *a, **kw: response)
+    monkeypatch.setattr(pdf, 'download_pdf', lambda url, max_bytes: data)
 
 
 def fake_reader(prompt, schema, settings, *, images=None):
@@ -160,7 +157,7 @@ def test_pdf_cache_and_download_limit(monkeypatch, tmp_path):
     mock_download(monkeypatch, data)
     url = 'https://arxiv.org/pdf/example'
     assert pdf.load_pdf(url, store) == data
-    monkeypatch.setattr(pdf.requests, 'get', lambda *a, **kw: pytest.fail('Cache must avoid network'))
+    monkeypatch.setattr(pdf, 'download_pdf', lambda *a, **kw: pytest.fail('Cache must avoid network'))
     assert pdf.load_pdf(url, store) == data
     monkeypatch.setattr(pdf, 'MAX_PDF_BYTES', 4)
     with pytest.raises(ValueError, match='download limit'):
@@ -168,6 +165,15 @@ def test_pdf_cache_and_download_limit(monkeypatch, tmp_path):
     mock_download(monkeypatch, b'12345')
     with pytest.raises(ValueError, match='download limit'):
         pdf.load_pdf('https://arxiv.org/pdf/other')
+
+
+def test_load_pdf_requires_an_open_url_and_uses_safe_downloader(monkeypatch):
+    with pytest.raises(ValueError, match='No open PDF URL'):
+        pdf.load_pdf(None)
+    seen, data = [], document(1)
+    monkeypatch.setattr(pdf, 'download_pdf', lambda url, max_bytes: seen.append((url, max_bytes)) or data)
+    assert pdf.load_pdf('https://publisher.example/open.pdf') == data
+    assert seen == [('https://publisher.example/open.pdf', pdf.MAX_PDF_BYTES)]
 
 
 def test_hierarchical_reduction_bounds_context_and_preserves_page_citations(monkeypatch):

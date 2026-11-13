@@ -1,12 +1,14 @@
-<script setup>
+<script setup lang="ts">
 import { t } from './i18n'
 import { studyFields } from './reviewOptions'
+import type { ReviewOptions } from './types'
 
-const props = defineProps({ modelValue: { type: Object, required: true }, disabled: Boolean })
-const emit = defineEmits(['update:modelValue'])
-function update(key, value) {
+const props = defineProps<{ modelValue: ReviewOptions; disabled?: boolean }>()
+const emit = defineEmits<{ 'update:modelValue': [value: ReviewOptions] }>()
+function update<K extends keyof ReviewOptions>(key: K, value: ReviewOptions[K]) {
   emit('update:modelValue', { ...props.modelValue, [key]: value })
 }
+const field = (event: Event) => (event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value
 </script>
 
 <template>
@@ -16,14 +18,14 @@ function update(key, value) {
     <div class="option-row">
       <label>{{ t('Output') }}
         <select :value="modelValue.mode" :disabled="disabled" data-testid="output-mode"
-          @change="update('mode', $event.target.value)">
+          @change="update('mode', field($event) as ReviewOptions['mode'])">
           <option value="review">{{ t('Literature review') }}</option>
           <option value="introduction">{{ t('Introduction draft') }}</option>
         </select>
       </label>
       <label>{{ t('Language') }}
         <select :value="modelValue.language" :disabled="disabled" data-testid="output-language"
-          @change="update('language', $event.target.value)">
+          @change="update('language', field($event) as ReviewOptions['language'])">
           <option value="zh-TW">繁體中文</option>
           <option value="en">English</option>
         </select>
@@ -36,7 +38,7 @@ function update(key, value) {
         <label v-for="[key, label] in studyFields" :key="key">{{ t(label) }}
           <textarea :value="modelValue[key]" :data-testid="`study-${key}`" :disabled="disabled"
             :maxlength="key === 'title' ? 2000 : 3000" rows="2"
-            @input="update(key, $event.target.value)"></textarea>
+            @input="update(key, field($event))"></textarea>
         </label>
       </div>
     </template>

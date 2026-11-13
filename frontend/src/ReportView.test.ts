@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 import ReportView from './ReportView.vue'
 
 it('shows visual page coverage, limitations and original page observations', () => {
-  const wrapper = mount(ReportView, { props: { result: { review: '# Findings\nA figure [P1, p. 10].', evidence: [{
+  const wrapper = mount(ReportView, { props: { result: { id: 'job-1', status: 'completed', review: '# Findings\nA figure [P1, p. 10].', evidence: [{
     id: 'P1', title: 'Visual paper', year: 2025, coverage: 'limited multimodal PDF',
     page_count: 12, processed_pages: 12, batch_count: 3, limited_pages: [11],
     pages: [

@@ -1,10 +1,11 @@
-<script setup>
+<script setup lang="ts">
 import { t } from './i18n'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
+import type { EvidenceItem, ReviewJob } from './types'
 
-const props = defineProps({ result: { type: Object, required: true } })
+const props = defineProps<{ result: ReviewJob }>()
 
 const markdown = new MarkdownIt({ html: false, linkify: true })
 // Give headings stable ids so the table of contents can link to them.
@@ -15,11 +16,11 @@ markdown.core.ruler.push('heading_ids', state => {
   }
 })
 
-const evidence = computed(() => props.result.evidence || [])
+const evidence = computed<EvidenceItem[]>(() => props.result.evidence || [])
 const sourceIds = computed(() => new Set(evidence.value.map(item => item.id)))
 const toc = computed(() => {
   const tokens = markdown.parse(props.result.review || '', {})
-  const headings = []
+  const headings: { id: string; level: string; text: string }[] = []
   let index = 0
   tokens.forEach((token, i) => {
     if (token.type !== 'heading_open') return
@@ -33,7 +34,7 @@ const toc = computed(() => {
 const html = computed(() => {
   const rendered = markdown.render(props.result.review || '')
   // Keep the supplied page visible while linking the citation to source evidence.
-  const linked = rendered.replace(/\[(P\d+(?:\s*[,;]\s*P\d+)*)(?:,\s*p\.\s*(\d+))?\]/g, (match, list, page) => {
+  const linked = rendered.replace(/\[(P\d+(?:\s*[,;]\s*P\d+)*)(?:,\s*p\.\s*(\d+))?\]/g, (match: string, list: string, page?: string) => {
     const ids = list.split(/\s*[,;]\s*/)
     if (!ids.every(id => sourceIds.value.has(id))) return match
     return ids.map(id => `<a class="cite" href="#source-${id}">${id}${page ? `, p. ${page}` : ''}</a>`).join(' ')
@@ -42,16 +43,16 @@ const html = computed(() => {
 })
 
 const tocOpen = ref(false)
-const tocEl = ref(null)
-const reportEl = ref(null)
+const tocEl = ref<HTMLElement | null>(null)
+const reportEl = ref<HTMLElement | null>(null)
 // Only offer the floating contents button while the report is on screen.
 const reportVisible = ref(true)
-let observer
+let observer: IntersectionObserver | undefined
 
-function closeOnOutside(event) {
-  if (tocOpen.value && !tocEl.value?.contains(event.target)) tocOpen.value = false
+function closeOnOutside(event: MouseEvent) {
+  if (tocOpen.value && !tocEl.value?.contains(event.target as Node)) tocOpen.value = false
 }
-function closeOnEscape(event) {
+function closeOnEscape(event: KeyboardEvent) {
   if (event.key === 'Escape') tocOpen.value = false
 }
 
@@ -72,7 +73,7 @@ onBeforeUnmount(() => {
   observer?.disconnect()
 })
 
-function download(content, filename, type) {
+function download(content: string, filename: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }))
   const link = document.createElement('a')
   link.href = url
@@ -98,7 +99,7 @@ function download(content, filename, type) {
       <div class="report-head">
         <h2>{{ t(result.options?.mode === 'introduction' ? `Introduction: ${result.topic}` : result.topic ? `Review: ${result.topic}` : 'Your literature review') }}</h2>
         <div class="downloads">
-          <button class="secondary" @click="download(result.review, 'review.md', 'text/markdown')">Markdown ↓</button>
+          <button class="secondary" @click="download(result.review ?? '', 'review.md', 'text/markdown')">Markdown ↓</button>
           <button class="secondary" @click="download(JSON.stringify(evidence, null, 2), 'evidence.json', 'application/json')">{{ t('Evidence JSON ↓') }}</button>
         </div>
       </div>

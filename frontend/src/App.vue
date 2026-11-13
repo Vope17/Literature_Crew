@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { t, locale } from './i18n'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import ReportView from './ReportView.vue'
@@ -9,18 +9,30 @@ import ModelPicker from './ModelPicker.vue'
 import ThemePicker from './ThemePicker.vue'
 import LanguagePicker from './LanguagePicker.vue'
 import { defaultReviewOptions } from './reviewOptions'
+import { ApiError, errorMessage, request } from './api'
+import {
+  DEFAULT_SOURCES, SOURCE_STORAGE_KEY, doiText, doiUrl, hasOpenFullText, normalizeSources,
+  paperLinkLabel, paperSources, publicationTypeLabel,
+} from './paperInfo'
+import type {
+  AppConfig, FilterKey, HistorySummary, Paper, ReviewJob, ReviewOptions as ReviewOptionValues, SavedHistory,
+  SearchArea, SearchFilters, SearchResponse, SearchSource, SourceKey, SourceStatus,
+} from './types'
 
 const topic = ref('')
 const searchedTopic = ref('')
 const limit = ref(5)
 const area = ref('all')
-const areas = ref([{ value: 'all', label: 'All subjects' }])
-const yearFrom = ref('')
-const yearTo = ref('')
+const areas = ref<SearchArea[]>([{ value: 'all', label: 'All subjects' }])
+const sourceOptions = ref<SearchSource[]>(DEFAULT_SOURCES)
+const selectedSources = ref<SourceKey[]>(DEFAULT_SOURCES.map(item => item.value))
+const sourceStatus = ref<SourceStatus[]>([])
+const yearFrom = ref<number | string>('')
+const yearTo = ref<number | string>('')
 const maxYear = new Date().getFullYear() + 1
-const appliedFilters = ref('')
-const filterOverrides = ref([])
-function pinFilter(key) {
+const appliedFilters = ref<SearchFilters | null>(null)
+const filterOverrides = ref<FilterKey[]>([])
+function pinFilter(key: FilterKey) {
   if (!filterOverrides.value.includes(key)) filterOverrides.value.push(key)
 }
 const filterError = computed(() => {
@@ -32,8 +44,8 @@ const filterError = computed(() => {
   return yearFrom.value !== '' && yearTo.value !== '' && Number(yearFrom.value) > Number(yearTo.value)
     ? 'Start year must not be later than end year.' : ''
 })
-const papers = ref([])
-const selected = ref([])
+const papers = ref<Paper[]>([])
+const selected = ref<number[]>([])
 const model = ref('')
 const selectedModel = ref('')
 const hasServerKey = ref(false)
@@ -50,19 +62,19 @@ const aiLabel = ref('OpenAI API')
 const aiReady = ref(false)
 const chatgptConnected = ref(false)
 const setupHint = ref('Set OPENAI_API_KEY and MODEL in backend/.env, then restart the backend.')
-const reviewOptions = ref(defaultReviewOptions())
+const reviewOptions = ref<ReviewOptionValues>(defaultReviewOptions())
 const maxPapers = ref(5)
 const busy = ref('')
 const error = ref('')
 const searched = ref(false)
 const searchNotice = ref('')
-const searchKeywords = ref([])
+const searchKeywords = ref<string[]>([])
 const searchSource = ref('')
-const result = ref(null)
-const activeReview = ref(null)
+const result = ref<ReviewJob | null>(null)
+const activeReview = ref<ReviewJob | null>(null)
 const reviewError = ref('')
 const historyExpanded = ref(false)
-const historyItems = ref([])
+const historyItems = ref<HistorySummary[]>([])
 const historyLoading = ref(false)
 const historyError = ref('')
 const historyHasMore = ref(false)
@@ -70,15 +82,17 @@ const openingHistory = ref('')
 const retryUntil = ref(0)
 const now = ref(Date.now())
 const retrySeconds = computed(() => Math.max(0, Math.ceil((retryUntil.value - now.value) / 1000)))
-let retryTimer
-let pollTimer
+let retryTimer: ReturnType<typeof setInterval> | undefined
+let pollTimer: ReturnType<typeof setTimeout> | undefined
 let mounted = true
 const reviewElapsed = computed(() => activeReview.value?.created_at
   ? Math.max(0, Math.floor((now.value - Date.parse(activeReview.value.created_at)) / 1000)) : 0)
 const filtersOpen = ref(false)
 const compact = ref(false)
-const expandedAbstracts = ref([])
-const historyKind = ref('all')
+const expandedAbstracts = ref<string[]>([])
+type HistoryKind = 'all' | 'review' | 'search'
+const historyKinds: [HistoryKind, string][] = [['all', 'All'], ['review', 'Reviews'], ['search', 'Searches']]
+const historyKind = ref<HistoryKind>('all')
 const visibleHistory = computed(() => historyKind.value === 'all'
   ? historyItems.value : historyItems.value.filter(item => item.kind === historyKind.value))
 const configured = computed(() => {
@@ -95,16 +109,17 @@ const generateLabel = computed(() => {
 })
 // The shown review was generated from exactly the current topic and selection.
 const alreadyGenerated = computed(() => {
-  const reviewed = result.value?.papers
-  if (!reviewed?.length || result.value.topic !== searchedTopic.value) return false
-  if (result.value.ai_backend && result.value.ai_backend !== aiBackend.value) return false
-  if (selectedModel.value && result.value.model !== selectedModel.value) return false
-  if (JSON.stringify({ ...defaultReviewOptions(), ...result.value.options }) !== JSON.stringify(reviewOptions.value)) return false
+  const current = result.value
+  const reviewed = current?.papers
+  if (!current || !reviewed?.length || current.topic !== searchedTopic.value) return false
+  if (current.ai_backend && current.ai_backend !== aiBackend.value) return false
+  if (selectedModel.value && current.model !== selectedModel.value) return false
+  if (JSON.stringify({ ...defaultReviewOptions(), ...current.options }) !== JSON.stringify(reviewOptions.value)) return false
   const urls = new Set(reviewed.map(paper => paper.url))
   return urls.size === selectedPapers.value.length && selectedPapers.value.every(paper => urls.has(paper.url))
 })
 const filterChips = computed(() => {
-  const chips = []
+  const chips: { key: FilterKey; label: string }[] = []
   if (area.value !== 'all') {
     chips.push({ key: 'area', label: t(areas.value.find(item => item.value === area.value)?.label || area.value) })
   }
@@ -115,30 +130,7 @@ const filterChips = computed(() => {
   return chips
 })
 
-async function request(path, body) {
-  let response
-  const signal = AbortSignal.timeout(path === 'search' ? 310_000 : path === 'ai/connection' ? 60_000 : 15_000)
-  try {
-    response = await fetch(`/api/${path}`, body ? {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal,
-    } : { signal, cache: 'no-store' })
-  } catch {
-    throw new Error('Cannot reach the server. Check that the Python backend is running.')
-  }
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const failure = new Error(typeof data.detail === 'string' ? data.detail : 'Request failed. Please retry.')
-    failure.status = response.status
-    failure.retryAfter = Number(response.headers?.get('Retry-After')) || 0
-    throw failure
-  }
-  return data
-}
-
-function applyConnection(config) {
+function applyConnection(config: AppConfig) {
   connectionId.value = config.connection_id || ''
   model.value = config.model
   hasServerKey.value = config.has_api_key
@@ -152,6 +144,26 @@ function applyConnection(config) {
   selectedModel.value = ''
   setupHint.value = config.setup_hint || setupHint.value
 }
+
+const selectedSourceLabels = computed(() => sourceOptions.value
+  .filter(item => selectedSources.value.includes(item.value)).map(item => item.label))
+
+function toggleSource(key: SourceKey) {
+  const next = selectedSources.value.includes(key)
+    ? selectedSources.value.filter(item => item !== key) : [...selectedSources.value, key]
+  // At least one catalog must stay selected.
+  if (!next.length) return
+  selectedSources.value = sourceOptions.value.map(item => item.value).filter(value => next.includes(value))
+  try { window.localStorage.setItem(SOURCE_STORAGE_KEY, JSON.stringify(selectedSources.value)) }
+  catch { /* The choice still applies for this page. */ }
+}
+
+function restoreSources(saved: unknown) {
+  selectedSources.value = normalizeSources(saved, sourceOptions.value)
+}
+
+// Selected papers whose PDF is not openly available are analysed from the abstract only.
+const abstractOnlyCount = computed(() => selectedPapers.value.filter(paper => !hasOpenFullText(paper)).length)
 
 async function switchConnection() {
   connectionError.value = ''
@@ -167,14 +179,14 @@ async function connectAI() {
   connectionBusy.value = true
   connectionError.value = ''
   try {
-    const config = await request('ai/connection', {
+    const config = await request<AppConfig>('ai/connection', {
       backend: connectionMode.value,
       ...(connectionMode.value === 'openai_api' && apiKey.value.trim() ? { api_key: apiKey.value.trim() } : {}),
     })
     applyConnection(config)
     apiKey.value = ''
   } catch (err) {
-    connectionError.value = err.message
+    connectionError.value = errorMessage(err)
   } finally {
     connectionBusy.value = false
   }
@@ -185,7 +197,7 @@ function editingApiKey() {
   selectedModel.value = ''
 }
 
-function modelConnectionError(message) {
+function modelConnectionError(message: string) {
   apiVerified.value = false
   claudeConnected.value = false
   chatgptConnected.value = false
@@ -195,12 +207,16 @@ function modelConnectionError(message) {
 onMounted(async () => {
   retryTimer = setInterval(() => { now.value = Date.now() }, 1000)
   try {
-    const config = await request('config')
+    const config = await request<AppConfig>('config')
     applyConnection(config)
     maxPapers.value = config.max_papers
     areas.value = config.search_areas || areas.value
+    sourceOptions.value = config.search_sources?.length ? config.search_sources : DEFAULT_SOURCES
+    let saved: unknown = null
+    try { saved = JSON.parse(window.localStorage.getItem(SOURCE_STORAGE_KEY) ?? 'null') } catch { /* Use every source. */ }
+    restoreSources(saved)
   } catch (err) {
-    error.value = err.message
+    error.value = errorMessage(err)
   }
   try {
     const savedId = window.localStorage.getItem('literature-active-review')
@@ -217,46 +233,47 @@ onBeforeUnmount(() => {
   clearTimeout(pollTimer)
 })
 
-function filterSummary(filters = {}) {
+function filterSummary(filters: Partial<SearchFilters> = {}) {
   const subject = t(areas.value.find(item => item.value === filters.area)?.label || 'All subjects')
   const years = filters.year_from || filters.year_to
     ? `${filters.year_from || t('Any year')}–${filters.year_to || t('present')}` : t('Any year')
-  return `${subject} · ${years}`
+  const catalogs = (filters.sources || []).map(key => sourceOptions.value.find(item => item.value === key)?.label || key)
+  return [subject, years, ...(catalogs.length ? [catalogs.join(', ')] : [])].join(' · ')
 }
 
-function shortCitation(paper) {
+function shortCitation(paper: Paper) {
   const surname = (paper.authors?.[0] || 'Unknown').trim().split(/\s+/).at(-1)
   return `${surname} ${paper.year}`
 }
 
-function clearChip(key) {
+function clearChip(key: FilterKey) {
   pinFilter(key)
   if (key === 'area') area.value = 'all'
   if (key === 'years') { yearFrom.value = ''; yearTo.value = '' }
   if (key === 'limit') limit.value = 5
 }
 
-function toggleAbstract(url) {
+function toggleAbstract(url: string) {
   expandedAbstracts.value = expandedAbstracts.value.includes(url)
     ? expandedAbstracts.value.filter(item => item !== url) : [...expandedAbstracts.value, url]
 }
 
-function selectTop(count) {
+function selectTop(count: number) {
   selected.value = papers.value.slice(0, Math.min(count, maxPapers.value)).map((_, i) => i)
 }
 
-function rememberReview(id) {
+function rememberReview(id: string | null) {
   try {
     if (id) window.localStorage.setItem('literature-active-review', id)
     else window.localStorage.removeItem('literature-active-review')
   } catch { /* Polling works even when local storage is unavailable. */ }
 }
 
-async function pollReview(id) {
+async function pollReview(id: string) {
   clearTimeout(pollTimer)
   reviewError.value = ''
   try {
-    const job = await request(`reviews/${id}`)
+    const job = await request<ReviewJob>(`reviews/${id}`)
     if (!mounted || activeReview.value?.id !== id) return
     if (job.status === 'completed' || job.status === 'failed') {
       activeReview.value = null
@@ -270,8 +287,8 @@ async function pollReview(id) {
     }
   } catch (err) {
     if (mounted && activeReview.value?.id === id) {
-      reviewError.value = err.message
-      if (err.status === 404) {
+      reviewError.value = errorMessage(err)
+      if (err instanceof ApiError && err.status === 404) {
         activeReview.value = null
         rememberReview(null)
       }
@@ -284,11 +301,11 @@ async function loadHistory(append = false) {
   historyLoading.value = true
   historyError.value = ''
   try {
-    const data = await request(`history?limit=20&offset=${append ? historyItems.value.length : 0}`)
+    const data = await request<{ items: HistorySummary[]; has_more: boolean }>(`history?limit=20&offset=${append ? historyItems.value.length : 0}`)
     historyItems.value = append ? [...historyItems.value, ...data.items] : data.items
     historyHasMore.value = data.has_more
   } catch (err) {
-    historyError.value = err.message
+    historyError.value = errorMessage(err)
   } finally {
     historyLoading.value = false
   }
@@ -299,11 +316,11 @@ function toggleHistory() {
   if (historyExpanded.value) loadHistory()
 }
 
-async function openHistory(id) {
+async function openHistory(id: string) {
   openingHistory.value = id
   historyError.value = ''
   try {
-    const saved = await request(`history/${id}`)
+    const saved = await request<SavedHistory>(`history/${id}`)
     if (!activeReview.value) reviewError.value = ''
     topic.value = saved.topic
     searchedTopic.value = saved.topic
@@ -313,12 +330,14 @@ async function openHistory(id) {
     searchSource.value = saved.source || 'saved review'
     searchNotice.value = saved.notice || ''
     searchKeywords.value = saved.keywords || []
-    appliedFilters.value = saved.kind === 'search' ? saved.filters : null
+    appliedFilters.value = saved.kind === 'search' ? saved.filters ?? null : null
+    sourceStatus.value = []
     if (saved.kind === 'search') {
       area.value = saved.filters?.area || 'all'
       yearFrom.value = saved.filters?.year_from ?? ''
       yearTo.value = saved.filters?.year_to ?? ''
       limit.value = saved.filters?.limit ?? 5
+      if (saved.filters?.sources) restoreSources(saved.filters.sources)
       filterOverrides.value = []
       result.value = null
     } else if (saved.status === 'completed') {
@@ -326,14 +345,14 @@ async function openHistory(id) {
       reviewOptions.value = { ...defaultReviewOptions(), ...saved.options }
     } else if (saved.status === 'failed') {
       result.value = null
-      reviewError.value = saved.error
+      reviewError.value = saved.error ?? ''
     } else {
       activeReview.value = saved
       rememberReview(id)
       await pollReview(id)
     }
   } catch (err) {
-    historyError.value = err.message
+    historyError.value = errorMessage(err)
   } finally {
     openingHistory.value = ''
   }
@@ -349,24 +368,27 @@ async function search() {
   busy.value = 'Extracting keywords with AI and searching papers…'
   error.value = ''
   try {
-    const filters = {
+    const filters: SearchFilters = {
       area: area.value,
       year_from: yearFrom.value === '' ? null : Number(yearFrom.value),
       year_to: yearTo.value === '' ? null : Number(yearTo.value),
     }
-    const data = await request('search', {
+    const data = await request<SearchResponse>('search', {
       topic: topic.value.trim(), limit: limit.value, ...filters, filter_overrides: filterOverrides.value,
+      sources: selectedSources.value,
       ...(connectionId.value ? { connection_id: connectionId.value } : {}),
       ...(selectedModel.value ? { model: selectedModel.value } : {}),
     })
     papers.value = data.papers
     searchNotice.value = data.notice || ''
     searchKeywords.value = data.keywords || []
-    searchSource.value = data.source || 'arXiv'
+    searchSource.value = data.source || selectedSourceLabels.value.join(' + ')
+    sourceStatus.value = data.source_status || []
     searchedTopic.value = topic.value.trim()
     const effective = data.filters || { ...filters, limit: limit.value }
     appliedFilters.value = effective
     area.value = effective.area
+    if (effective.sources) restoreSources(effective.sources)
     yearFrom.value = effective.year_from ?? ''
     yearTo.value = effective.year_to ?? ''
     limit.value = effective.limit ?? limit.value
@@ -376,8 +398,8 @@ async function search() {
     result.value = null
     if (historyExpanded.value) await loadHistory()
   } catch (err) {
-    error.value = err.message
-    if (err.retryAfter) {
+    error.value = errorMessage(err)
+    if (err instanceof ApiError && err.retryAfter) {
       now.value = Date.now()
       retryUntil.value = now.value + err.retryAfter * 1000
     }
@@ -397,7 +419,7 @@ async function generate() {
   reviewError.value = ''
   result.value = null
   try {
-    const job = await request('review', {
+    const job = await request<ReviewJob>('review', {
       topic: searchedTopic.value,
       papers: selectedPapers.value,
       options: reviewOptions.value,
@@ -411,11 +433,11 @@ async function generate() {
     // Each status request is short; the crew runs independently on the backend.
     void pollReview(job.id)
   } catch (err) {
-    if ([401, 403, 409].includes(err.status)) {
+    if (err instanceof ApiError && [401, 403, 409].includes(err.status)) {
       modelConnectionError(err.message)
       settingsOpen.value = true
     } else {
-      error.value = err.message
+      error.value = errorMessage(err)
     }
   } finally {
     busy.value = ''
@@ -443,7 +465,7 @@ function recentYears() {
     <header class="topbar">
       <div class="brand">Literature Crew<span>.</span></div>
       <span class="spacer"></span>
-      <details class="settings" :open="settingsOpen" @toggle="settingsOpen = $event.target.open">
+      <details class="settings" :open="settingsOpen" @toggle="settingsOpen = ($event.target as HTMLDetailsElement).open">
         <summary class="chip settings-trigger" :aria-label="t('Settings')">
           <span aria-hidden="true">⚙</span> {{ t('Settings') }}
         </summary>
@@ -512,6 +534,16 @@ function recentYears() {
           </div>
           <fieldset v-show="filtersOpen" id="search-filters" class="search-filters" :disabled="!!busy">
             <legend class="visually-hidden">{{ t('Search filters') }}</legend>
+            <div class="source-picker" role="group" :aria-label="t('Search sources')">
+              <span class="source-label">{{ t('Search sources') }}</span>
+              <label v-for="item in sourceOptions" :key="item.value" class="source-option">
+                <input type="checkbox" :data-testid="`source-${item.value}`" :checked="selectedSources.includes(item.value)"
+                  :disabled="selectedSources.includes(item.value) && selectedSources.length === 1"
+                  @change="toggleSource(item.value)" />
+                {{ item.label }}
+              </label>
+              <p class="muted">{{ t('Choose at least one source. Journal articles come mostly from OpenAlex and Semantic Scholar; arXiv covers preprints.') }}</p>
+            </div>
             <label>{{ t('Subject area') }}
               <select v-model="area" data-testid="area-filter" @change="pinFilter('area')">
                 <option v-for="item in areas" :key="item.value" :value="item.value">{{ t(item.label) }}</option>
@@ -532,7 +564,7 @@ function recentYears() {
             <button class="secondary" type="button" @click="resetFilters">{{ t('Reset filters') }}</button>
             <p class="muted">{{ t('AI fills subject, years and result count from your description. Manually changed fields take priority until Reset filters.') }}</p>
             <p v-if="filterOverrides.length" class="muted">{{ t('Manual overrides:') }} {{ filterOverrides.map(key => t(key === 'area' ? 'Subject area' : key === 'years' ? 'Years' : 'Results')).join(' · ') }}</p>
-            <p class="muted filter-hint">{{ t('Year uses arXiv submission dates or Semantic Scholar publication years. Subject classifications vary by source.') }}</p>
+            <p class="muted filter-hint">{{ t('Year uses arXiv submission dates or each catalog\'s publication year. Subject classifications vary by source.') }}</p>
           </fieldset>
           <p v-if="filterError" class="notice error" role="alert">{{ t(filterError) }}</p>
         </form>
@@ -564,6 +596,12 @@ function recentYears() {
               </div>
             </div>
           </div>
+          <ul v-if="sourceStatus.length" class="source-status" data-testid="source-status" :aria-label="t('Search sources')">
+            <li v-for="item in sourceStatus" :key="item.source" :class="item.status">
+              <strong>{{ item.source }}</strong>
+              {{ item.status === 'ok' ? t('{count} results', { count: item.count }) : t('unavailable') }}
+            </li>
+          </ul>
           <p v-if="searchNotice" class="notice warning" role="status">{{ t(searchNotice) }}</p>
           <p v-if="!papers.length" class="panel">{{ t('No papers found. Try a shorter topic or different keywords.') }}</p>
           <article v-for="(paper, i) in papers" :key="paper.url" class="panel paper"
@@ -571,15 +609,24 @@ function recentYears() {
             <input :id="`paper-${i}`" v-model="selected" type="checkbox" :value="i"
               :disabled="!!busy || (!selected.includes(i) && selected.length >= maxPapers)" />
             <div>
-              <div class="meta"><span>{{ paper.year }}</span><span class="tag">{{ t(searchSource === 'Semantic Scholar' ? 'via Semantic Scholar' : 'arXiv') }}</span></div>
+              <div class="meta">
+                <span>{{ paper.year }}</span>
+                <span v-for="name in paperSources(paper)" :key="name" class="tag">{{ name }}</span>
+                <span class="tag fulltext" :class="hasOpenFullText(paper) ? 'open' : 'abstract'" data-testid="full-text-state">
+                  {{ t(hasOpenFullText(paper) ? 'Open full text' : 'Abstract only') }}</span>
+              </div>
               <h3><label :for="`paper-${i}`">{{ paper.title }}</label></h3>
               <template v-if="!compact">
                 <p class="authors">{{ paper.authors.join(', ') }}</p>
-                <p class="abstract" :class="{ open: expandedAbstracts.includes(paper.url) }">{{ paper.abstract }}</p>
+                <p v-if="paper.journal" class="journal" data-testid="paper-journal">{{ paper.journal }}<template
+                  v-if="publicationTypeLabel(paper.publication_type)"> · {{ publicationTypeLabel(paper.publication_type) }}</template></p>
+                <p class="abstract" :class="{ open: expandedAbstracts.includes(paper.url) }">{{ paper.abstract || t('No abstract available.') }}</p>
                 <div class="paper-links">
                   <button class="link" type="button" @click="toggleAbstract(paper.url)">
                     {{ t(expandedAbstracts.includes(paper.url) ? 'Show less' : 'Show more') }}</button>
-                  <a :href="paper.url" target="_blank" rel="noopener noreferrer">{{ t('View on arXiv ↗') }}</a>
+                  <a :href="paper.url" target="_blank" rel="noopener noreferrer">{{ t(paperLinkLabel(paper)) }}</a>
+                  <a v-if="doiUrl(paper)" :href="doiUrl(paper) ?? undefined" target="_blank" rel="noopener noreferrer"
+                    data-testid="paper-doi">DOI: {{ doiText(paper) }} ↗</a>
                 </div>
               </template>
             </div>
@@ -594,7 +641,7 @@ function recentYears() {
           <button class="link" :disabled="historyLoading" @click="loadHistory()">{{ t('Refresh') }}</button>
         </div>
         <div class="seg" role="group" :aria-label="t('History type')">
-          <button v-for="kind in [['all', 'All'], ['review', 'Reviews'], ['search', 'Searches']]" :key="kind[0]"
+          <button v-for="kind in historyKinds" :key="kind[0]"
             type="button" :class="{ on: historyKind === kind[0] }" :aria-pressed="historyKind === kind[0]"
             @click="historyKind = kind[0]">{{ t(kind[1]) }}</button>
         </div>
@@ -616,7 +663,7 @@ function recentYears() {
         <button v-if="historyHasMore" class="secondary" :disabled="historyLoading" @click="loadHistory(true)">{{ t('Load more') }}</button>
       </aside>
     </div>
-    <footer>Literature Crew · arXiv + Semantic Scholar · {{ aiLabel }}</footer>
+    <footer>Literature Crew · {{ selectedSourceLabels.join(' + ') }} · {{ aiLabel }}</footer>
   </main>
 
   <div v-if="searched && papers.length" class="selection-bar">
@@ -625,6 +672,7 @@ function recentYears() {
         <span v-for="n in maxPapers" :key="n" :class="{ filled: n <= selected.length }"></span>
       </div>
       <strong class="badge">{{ selected.length }} / {{ maxPapers }} {{ t('selected') }}</strong>
+      <span v-if="abstractOnlyCount" class="muted abstract-only" data-testid="abstract-only-note">{{ t('{count} without open full text: abstract only', { count: abstractOnlyCount }) }}</span>
       <span class="muted picked">{{ selectedPapers.map(shortCitation).join(' · ') }}</span>
       <span class="spacer"></span>
       <button class="secondary" type="button" :disabled="!!busy || !selected.length" @click="selected = []">{{ t('Clear') }}</button>

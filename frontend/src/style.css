@@ -212,3 +212,17 @@ footer { color: var(--muted); font-size: 12px; padding: 32px 0 8px; }
   .picked, .slots { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Search sources, per-paper catalog tags and full-text state */
+.source-picker { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+.source-picker .muted { flex-basis: 100%; margin: 0; }
+.source-label { font-weight: 600; font-size: 14px; }
+.source-option { display: inline-flex; flex-direction: row; gap: 6px; align-items: center; font-size: 14px; cursor: pointer; }
+.source-option input { width: auto; margin: 0; }
+.source-status { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 0 0 12px; font-size: 13px; }
+.source-status li { border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; color: var(--muted); }
+.source-status li.unavailable { border-color: var(--off); }
+.tag.fulltext.open { border-color: var(--accent); color: var(--accent); }
+.tag.fulltext.abstract { color: var(--muted); }
+.journal { margin: 0 0 4px; font-size: 14px; font-style: italic; color: var(--muted); }
+.abstract-only { font-size: 13px; }

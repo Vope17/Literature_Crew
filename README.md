@@ -1,6 +1,6 @@
 # Literature Crew
 
-Minimal implementation of `CrewAI_文獻搜尋.pdf`: **Vue 3 + Vite** frontend,
+Minimal implementation of `CrewAI_文獻搜尋.pdf`: **Vue 3 + Vite + TypeScript** frontend,
 **FastAPI + CrewAI** backend, and **uv** for Python dependencies. Reports follow
 the supplied `緒論規範.pdf`: evidence-linked thematic synthesis, alternative findings,
 candidate research gaps, and an optional introduction draft with your study details.
@@ -201,13 +201,24 @@ The choice is saved in this browser and is independent of the report's output la
 4. Click **Show history** to expand saved searches and reviews, then **Open result**
    to restore one. Reopening a saved review does not generate it again or use API credits.
 
-Search filters apply to both arXiv and the Semantic Scholar fallback. Leave either
+**Search sources.** Open **+ Filters** and choose any of OpenAlex, Semantic Scholar and arXiv
+(at least one; all three by default; the choice is remembered in the browser). The selected sources
+are queried in parallel and merged: papers are matched by DOI, arXiv ID or link, ranks are interleaved
+because citation counts and scores are not comparable across catalogs, and the merged record keeps the
+journal, ISSN, DOI, longest abstract and an arXiv PDF when one exists. Each result shows its catalogs,
+journal, DOI and whether an open PDF exists; papers without one are analysed from the abstract only
+(and a paper with neither abstract nor PDF is flagged so the model makes no claims about it). If some
+sources fail the others' results are still shown with a per-source status; only when every selected
+source fails does the search return an error. Open PDFs from publishers or repositories are downloaded
+only over public HTTPS (each redirect re-checked, the connection pinned to the verified IP, 20 MB limit).
+
+Search filters apply to every selected source. Leave either
 year blank for an open-ended range. Manually changed fields take priority over AI inference
 until **Reset filters**, which clears the overrides, subject and years, and resets the result
 count to 5. Subsequent searches infer unpinned fields afresh, without retaining old AI filters.
 **Last 5 calendar years** sets the current year and previous four years;
 you can still select older theoretical or historical sources. The results header records the filters used for the last search. Years use
-arXiv submission dates or Semantic Scholar publication years. Subject taxonomies
+arXiv submission dates or each catalog's publication year. Subject taxonomies
 differ: biology maps to arXiv quantitative biology, and electrical engineering maps
 to arXiv eess versus Semantic Scholar's broader Engineering field.
 
@@ -244,7 +255,10 @@ authentication and is intended for local use.
 - `backend/search_keywords.py`: AI keyword extraction through the selected OpenAI API or official CLI, with validated structured output.
 - `backend/paper_search.py`: arXiv queries, Atom parsing, shared request pacing, and caching.
 - `backend/search_filters.py`: validated subject/year filters and provider-specific mappings.
-- `backend/semantic_search.py`: independent Semantic Scholar fallback with its own pacing and cache.
+- `backend/semantic_search.py`: Semantic Scholar search with its own pacing and cache; keeps papers without an arXiv ID (DOI or publisher link, open-access PDF, venue).
+- `backend/openalex_search.py`: OpenAlex works search (journals, proceedings, preprints) with abstract reconstruction, ISSN/venue and open-access PDF extraction.
+- `backend/search_catalog.py`: runs the selected sources concurrently, merges duplicates and reports per-source status.
+- `backend/paper_urls.py`: public-HTTPS URL checks, DOI normalisation and the DNS-pinned PDF downloader.
 - `backend/model_catalog.py`: model discovery with the OpenAI SDK.
 - `backend/pdf_reading.py`: bounded PDF download, full-page rendering, batched visual reading and hierarchical evidence reduction.
 - `backend/ai_reading.py`: structured text/image calls through the selected API or CLI.
@@ -306,14 +320,14 @@ source and returns arXiv-linked papers from the first batch (up to 1,000 records
 ordered by citation count. The search box accepts natural-language research descriptions; it no longer passes through
 arXiv field operators. AI extracts plain terms, which arXiv combines with AND.
 This is AI-assisted keyword retrieval, not embedding-based similarity search.
-PDFs still come from arXiv; blocked PDF downloads use the returned abstracts.
+PDFs come from arXiv or the open-access link a catalog reports; blocked or missing PDFs use the returned abstracts.
 Invalid queries, timeouts, and connectivity failures are reported
 separately rather than hidden behind one generic error.
 
-If both providers are rate-limited, wait for the displayed cooldown. You can also
-set an optional `SEMANTIC_SCHOLAR_API_KEY` in `backend/.env` and restart the backend
-to use dedicated Semantic Scholar credentials. Request a key through
-[Semantic Scholar](https://www.semanticscholar.org/product/api).
+If every selected source is rate-limited, wait for the displayed cooldown. You can also
+set optional `SEMANTIC_SCHOLAR_API_KEY` and `OPENALEX_API_KEY` in `backend/.env` and restart the backend
+to use dedicated credentials. Request keys through
+[Semantic Scholar](https://www.semanticscholar.org/product/api) and [OpenAlex](https://docs.openalex.org/how-to-use-the-api/api-overview).
 
 PDF downloads remain limited to 20 MB. Each PDF page is now rendered to an RGB PNG
 (longest edge at most 2,000 pixels, reduced further if a PNG exceeds 4 MB) and submitted with its extracted text to the selected
@@ -357,8 +371,8 @@ the tab does not cancel an already-running backend review.
 
 ```sh
 uv run --directory backend pytest
-pnpm --dir frontend test
-pnpm --dir frontend build
+pnpm --dir frontend test    # vue-tsc type check, then Vitest
+pnpm --dir frontend build   # type check, then production build
 ```
 
 Tests use local PDFs and mocked services; they do not need API keys or credits.

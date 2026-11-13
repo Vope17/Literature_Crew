@@ -16,6 +16,8 @@ from review_guidelines import (
 )
 
 MAX_PAPERS = 5
+NO_TEXT_NOTICE = ("No abstract or open full text was available for this paper. Only its bibliographic "
+                  "metadata (title, authors, year, journal) is known; make no claims about its content.")
 
 
 def collect_evidence(
@@ -27,14 +29,20 @@ def collect_evidence(
         progress(f"Loading paper {index}/{len(papers)}: {paper.title}")
         item = {"id": f"P{index}", **asdict(paper)}
         try:
+            if not paper.pdf_url:
+                raise ValueError("No open full text is available.")
             data = load_pdf(paper.pdf_url, store=pdf_store)
         except (requests.RequestException, RuntimeError, ValueError):
-            item.update(text=paper.abstract, coverage="abstract only",
-                        error="PDF download or opening failed; only the abstract was supplied.")
+            item.update(
+                # Never hand the analyst an empty text to fill in from its own knowledge.
+                text=paper.abstract or NO_TEXT_NOTICE, coverage="abstract only",
+                error=("No open full text is available; only the abstract was supplied." if not paper.pdf_url
+                       else "PDF download or opening failed; only the abstract was supplied."),
+            )
         else:
             # Analysis/rendering failures must stop the job, never masquerade as completed reading.
             item.update(read_pdf(data, item["id"], topic, settings, progress))
-        if pdf_store is not None:
+        if pdf_store is not None and paper.pdf_url:
             item["stored_pdf_url"] = pdf_store.pdf_link(paper.pdf_url)
         evidence.append(item)
     return evidence
