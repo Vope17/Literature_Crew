@@ -24,6 +24,9 @@ from paper_search import SearchError
 from search_keywords import MAX_TOPIC_CHARS, extract_keywords
 from semantic_search import search_semantic_scholar
 from search_filters import AREAS, SearchFilters
+from openalex_search import search_openalex
+from search_catalog import search_catalog, SOURCE_LABELS
+from paper_urls import public_url
 from storage import HistoryStore
 from review_jobs import ReviewJobs
 from ai_backend import AIBackendError, AISettings, get_settings, require_cli_login
@@ -64,6 +67,8 @@ class SearchRequest(SearchFilters):
     model: str | None = Field(default=None, min_length=1, max_length=200)
     connection_id: str | None = Field(default=None, max_length=128)
     filter_overrides: list[Literal["area", "years", "limit"]] | None = Field(default=None, max_length=3)
+    # Omitted by older clients, which retain the arXiv -> Semantic Scholar fallback.
+    sources: list[Literal["arxiv", "openalex", "semantic_scholar"]] | None = Field(default=None, min_length=1, max_length=3)
 
 
 class PaperInput(BaseModel):
@@ -71,23 +76,22 @@ class PaperInput(BaseModel):
     authors: list[str] = Field(max_length=1000)
     year: int
     url: str
-    pdf_url: str
+    pdf_url: str | None = None
     abstract: str = Field(max_length=50_000)
     doi: str | None = None
+    source: str = Field(default="arXiv", max_length=100)
+    journal: str | None = Field(default=None, max_length=2000)
+    issn: list[str] = Field(default_factory=list, max_length=20)
+    publication_type: str | None = Field(default=None, max_length=200)
+    sources: list[str] = Field(default_factory=list, max_length=3)
 
     @field_validator("url", "pdf_url")
     @classmethod
-    def arxiv_url(cls, value: str, info) -> str:
-        parsed = urlsplit(value)
-        prefix = "/pdf/" if info.field_name == "pdf_url" else "/abs/"
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != "arxiv.org"
-            or not parsed.path.startswith(prefix)
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("Only HTTPS arXiv paper URLs are accepted.")
+    def paper_url(cls, value, info):
+        if value is None and info.field_name == "pdf_url":
+            return None
+        if not public_url(value):
+            raise ValueError("Only public HTTPS paper URLs are accepted.")
         return value
 
 
@@ -141,6 +145,7 @@ def config(request: Request):
         "connection_id": app.state.ai_sessions.identifier(request.cookies.get(COOKIE_NAME)),
         "max_papers": MAX_PAPERS,
         "search_areas": [{"value": value, "label": details[0]} for value, details in AREAS.items()],
+        "search_sources": [{"value": value, "label": label} for value, label in SOURCE_LABELS.items()],
     }
 
 
@@ -168,29 +173,19 @@ def search_with_keywords(body, keywords, settings):
         body.limit, body.filter_overrides,
     )
     applied_filters = {**filters.model_dump(), "limit": limit}
+    if body.sources is not None:
+        applied_filters["sources"] = list(dict.fromkeys(body.sources))
     try:
-        try:
-            papers = search_papers(keywords.query, limit, filters=filters)
-            source, notice = "arXiv", None
-        except SearchError as primary_error:
-            if primary_error.status_code not in (429, 502, 503, 504):
-                raise
-            try:
-                papers = search_semantic_scholar(keywords.query, limit, filters=filters)
-            except SearchError as fallback_error:
-                raise SearchError(
-                    f"arXiv is unavailable. {fallback_error}",
-                    fallback_error.status_code, fallback_error.retry_after,
-                ) from None
-            source = "Semantic Scholar"
-            notice = (
-                "arXiv search is unavailable. Showing arXiv-linked papers found through "
-                "Semantic Scholar, ordered by citation count."
-            )
-            if not papers:
-                notice += " No arXiv-linked matches were found in the first results page; try different keywords."
+        source_status = []
+        if body.sources is not None:
+            papers, source_status, notice = search_catalog(keywords.query, limit, filters, body.sources, {
+                "arxiv": search_papers, "semantic_scholar": search_semantic_scholar, "openalex": search_openalex,
+            })
+            source = " + ".join(item["source"] for item in source_status if item["status"] == "ok")
+        else:
+            papers, source, notice = legacy_search(keywords.query, limit, filters)
         payload = {"papers": [asdict(paper) for paper in papers], "source": source, "notice": notice,
-                   "keywords": keywords.keywords, "filters": applied_filters}
+                   "keywords": keywords.keywords, "filters": applied_filters, "source_status": source_status}
         payload["history_id"] = app.state.store.create(
             kind="search", topic=body.topic, papers=payload["papers"], filters=applied_filters,
             source=source, notice=notice,
@@ -203,8 +198,32 @@ def search_with_keywords(body, keywords, settings):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
     except Exception:
-        logger.exception("Unexpected arXiv search failure")
+        logger.exception("Unexpected paper search failure")
         raise HTTPException(502, "Unexpected search error. Check the backend log for details.") from None
+
+
+def legacy_search(query, limit, filters):
+        try:
+            papers = search_papers(query, limit, filters=filters)
+            source, notice = "arXiv", None
+        except SearchError as primary_error:
+            if primary_error.status_code not in (429, 502, 503, 504):
+                raise
+            try:
+                papers = search_semantic_scholar(query, limit, filters=filters)
+            except SearchError as fallback_error:
+                raise SearchError(
+                    f"arXiv is unavailable. {fallback_error}",
+                    fallback_error.status_code, fallback_error.retry_after,
+                ) from None
+            source = "Semantic Scholar"
+            notice = (
+                "arXiv search is unavailable. Showing papers found through "
+                "Semantic Scholar, ordered by citation count."
+            )
+            if not papers:
+                notice += " No matches were found; try different keywords."
+        return papers, source, notice
 
 
 async def chatgpt_auth_response(request: Request, action: str):

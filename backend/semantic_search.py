@@ -5,11 +5,13 @@ import re
 import threading
 import time
 import math
+from urllib.parse import quote
 
 import requests
 
 from paper_search import Paper, SearchError, retry_seconds
 from search_filters import SearchFilters
+from paper_urls import public_url, normalize_doi
 
 
 def parse_papers(payload: dict, limit: int, filters: SearchFilters | None = None) -> list[Paper]:
@@ -18,23 +20,33 @@ def parse_papers(payload: dict, limit: int, filters: SearchFilters | None = None
         raise SearchError("Semantic Scholar returned an invalid response.")
     papers, seen = [], set()
     for item in payload["data"]:
+        if not isinstance(item, dict):
+            continue
         identifiers = item.get("externalIds") or {}
         arxiv_id = identifiers.get("ArXiv", "")
         if not isinstance(arxiv_id, str) or not re.fullmatch(r"(?:\d{4}\.\d{4,5}|[a-zA-Z.-]+/\d{7})(?:v\d+)?", arxiv_id):
-            continue
-        if arxiv_id in seen or not item.get("title") or not isinstance(item.get("year"), int):
+            arxiv_id = ""
+        doi = normalize_doi(identifiers.get("DOI"))
+        url = (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else
+               public_url("https://doi.org/" + quote(doi, safe="/():;")) if doi else public_url(item.get("url")))
+        if not url or url in seen or not item.get("title") or not isinstance(item.get("year"), int):
             continue
         if not filters.includes_year(item["year"]):
             continue
-        seen.add(arxiv_id)
+        seen.add(url)
+        venue = item.get("journal") or {}
+        publication = item.get("publicationVenue") or {}
         papers.append(Paper(
-            title=item["title"],
-            authors=[author["name"] for author in item.get("authors", []) if author.get("name")],
+            title=item["title"][:2000],
+            authors=[author["name"] for author in item.get("authors", []) if author.get("name")][:1000],
             year=item["year"],
-            url=f"https://arxiv.org/abs/{arxiv_id}",
-            pdf_url=f"https://arxiv.org/pdf/{arxiv_id}",
-            abstract=item.get("abstract") or "Abstract not provided by Semantic Scholar.",
-            doi=identifiers.get("DOI"),
+            url=url,
+            pdf_url=f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else public_url((item.get("openAccessPdf") or {}).get("url")),
+            abstract=(item.get("abstract") or "")[:50_000], doi=doi,
+            source="Semantic Scholar", sources=["Semantic Scholar"],
+            journal=venue.get("name") or publication.get("name") or item.get("venue") or None,
+            issn=[publication["issn"]] if publication.get("issn") else [],
+            publication_type=", ".join(item.get("publicationTypes") or []) or None,
         ))
         if len(papers) >= limit:
             break
@@ -73,7 +85,7 @@ class SemanticScholarSearch:
                     "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
                     params={
                         "query": topic,
-                        "fields": "title,authors,year,abstract,externalIds",
+                        "fields": "title,authors,year,abstract,externalIds,url,openAccessPdf,journal,publicationVenue,publicationTypes,venue",
                         "sort": "citationCount:desc",
                         **filters.semantic_params(),
                     },

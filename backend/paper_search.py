@@ -5,7 +5,7 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
@@ -24,9 +24,14 @@ class Paper:
     authors: list[str]
     year: int
     url: str
-    pdf_url: str
+    pdf_url: str | None
     abstract: str
     doi: str | None = None
+    source: str = "arXiv"
+    journal: str | None = None
+    issn: list[str] = field(default_factory=list)
+    publication_type: str | None = None
+    sources: list[str] = field(default_factory=list)
 
 
 class SearchError(Exception):
@@ -78,6 +83,7 @@ def parse_feed(content: bytes) -> list[Paper]:
                 pdf_url=f"https://arxiv.org/pdf/{identifier}",
                 abstract=entry.findtext(f"{ATOM}summary", "").strip(),
                 doi=entry.findtext(f"{ARXIV}doi"),
+                journal=entry.findtext(f"{ARXIV}journal_ref"),
             ))
         return papers
     except (ET.ParseError, ValueError) as exc:

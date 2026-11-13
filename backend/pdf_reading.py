@@ -8,6 +8,7 @@ from typing import Literal
 
 import pymupdf
 import requests
+from paper_urls import download_pdf
 from pydantic import Field, model_validator
 
 from ai_backend import AIBackendError
@@ -78,16 +79,11 @@ class PageInput:
 
 
 def load_pdf(url, store=None):
+    if not url:
+        raise ValueError("No open PDF URL was supplied.")
     data = store.get_pdf(url=url) if store is not None else None
     if data is None:
-        with requests.get(url, timeout=(10, 45), stream=True) as response:
-            response.raise_for_status()
-            buffer = bytearray()
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                buffer.extend(chunk)
-                if len(buffer) > MAX_PDF_BYTES:
-                    raise ValueError("PDF exceeds the 20 MB download limit.")
-        data = bytes(buffer)
+        data = download_pdf(url, MAX_PDF_BYTES)
     if len(data) > MAX_PDF_BYTES:
         raise ValueError("PDF exceeds the 20 MB download limit.")
     # Validate before caching; encrypted/invalid downloads cannot supply evidence.
