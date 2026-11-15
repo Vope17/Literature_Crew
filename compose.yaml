@@ -5,6 +5,9 @@ services:
       target: proxy
     ports:
       - "127.0.0.1:8000:80"
+    environment:
+      # Pages allowed to show Literature Crew in a frame: the iLearn portal. Empty forbids framing.
+      LITERATURE_FRAME_ANCESTORS: "${LITERATURE_FRAME_ANCESTORS-http://127.0.0.1:8090 http://localhost:8090}"
     depends_on:
       app:
         condition: service_healthy

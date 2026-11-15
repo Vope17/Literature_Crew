@@ -25,8 +25,10 @@ Nginx is the only published service: `localhost:8000 → nginx:80 → app:8000`.
 FastAPI is accessible only inside the Compose network. Nginx forwards the frontend,
 API polling and PDF downloads, and allows up to 300 seconds for AI keyword extraction and searches that
 retry upstream providers. Its upstream DNS refreshes when the app is recreated.
-Configuration is packaged from `nginx/default.conf`; run `docker compose exec nginx nginx -t`
+Configuration is packaged from `nginx/default.conf.template`; run `docker compose exec nginx nginx -t`
 to validate it. After editing, run `docker compose up --build -d nginx` to rebuild it.
+Only the iLearn portal (`http://127.0.0.1:8090`, `http://localhost:8090`) may show the app in a frame.
+Set `LITERATURE_FRAME_ANCESTORS` (space-separated origins) to change that, or to an empty value to forbid framing.
 
 Run tests entirely in Docker:
 

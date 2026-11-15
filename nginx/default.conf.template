@@ -11,6 +11,10 @@ server {
     server_tokens off;
     client_max_body_size 2m;
 
+    # Only the pages listed in LITERATURE_FRAME_ANCESTORS (the iLearn portal) may show this app in a frame.
+    # The nginx image fills the variable in at startup; an empty list forbids framing.
+    add_header Content-Security-Policy "frame-ancestors ${LITERATURE_FRAME_ANCESTORS}" always;
+
     location = /healthz {
         access_log off;
         return 204;

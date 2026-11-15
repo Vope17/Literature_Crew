@@ -12,7 +12,9 @@ FROM frontend-base AS frontend-build
 RUN pnpm build
 
 FROM nginx:stable-alpine AS proxy
-COPY nginx/default.conf /etc/nginx/conf.d/default.conf
+# Rendered to /etc/nginx/conf.d/default.conf by the image's entrypoint (envsubst of defined variables only).
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+ENV LITERATURE_FRAME_ANCESTORS=
 
 FROM python:3.12-slim-bookworm AS backend-base
 COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /uvx /usr/local/bin/
